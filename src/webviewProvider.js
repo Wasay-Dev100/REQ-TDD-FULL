@@ -6,18 +6,26 @@ class WebviewProvider {
     constructor(extensionUri) {
         this.panel = null;
         this.embeddedPackets = [];
+        this.generatedContracts = {}; // Store generated contracts
         this.extensionUri = extensionUri;
         this.currentSRSFilename = null;
+        this.testResultsStore = {}; // Store test results: { functionalityName: { passed, failed, total, timestamp } }
+        this.generationTimingStore = {}; // Store timing data: { functionalityName: { codeGen: { startTime, endTime, duration }, testGen: { startTime, endTime, duration } } }
     }
 
     static getInstance(extensionUri) {
         if (!WebviewProvider.instance) {
+            if (!extensionUri) {
+                console.error('❌ [WEBVIEW] extensionUri is required but not provided');
+                throw new Error('Extension URI is required to create WebviewProvider');
+            }
             WebviewProvider.instance = new WebviewProvider(extensionUri);
         }
         return WebviewProvider.instance;
     }
 
     createOrShow() {
+        try {
         if (this.panel) {
             this.panel.reveal();
             return;
@@ -37,6 +45,7 @@ class WebviewProvider {
         
         this.panel.webview.onDidReceiveMessage(
             message => {
+                    try {
                 switch (message.type) {
                     case 'uploadSRS':
                         this.handleUploadSRS(message.file);
@@ -48,14 +57,29 @@ class WebviewProvider {
                         this.handleExportCode(message.functionality, message.code, message.language);
                         break;
                     case 'generateTests':
-                        this.handleGenerateTests(message.functionality, message.code, message.language);
+                                this.handleGenerateTests(message.functionality, message.language);
                         break;
                     case 'verifyCode':
-                        this.handleVerifyCode(message.functionality, message.code);
+                                this.handleVerifyCode(message.functionality, message.code, message.testFunctionality);
+                                break;
+                            case 'exportCsv':
+                                this.handleExportCsv();
                         break;
+                        }
+                    } catch (error) {
+                        console.error('❌ [WEBVIEW] Error handling message:', error);
+                        vscode.window.showErrorMessage(`Extension error: ${error.message}`);
+                    }
                 }
-            }
-        );
+            );
+            
+            this.panel.onDidDispose(() => {
+                this.panel = null;
+            });
+        } catch (error) {
+            console.error('❌ [WEBVIEW] Error creating webview:', error);
+            vscode.window.showErrorMessage(`Failed to open extension: ${error.message}`);
+        }
     }
 
     getWebviewContent() {
@@ -274,7 +298,10 @@ class WebviewProvider {
                 <option value="csharp">C#</option>
             </select>
             
+            <div style="display: flex; gap: 10px; margin-top: 10px;">
+                <button class="generate-btn" id="generateTestsBtn" disabled style="background-color: #17a2b8; color: white;">Generate Tests (TDD)</button>
             <button class="generate-btn" id="generateBtn" disabled>Generate Code</button>
+            </div>
         </div>
         
         <div id="status"></div>
@@ -316,6 +343,7 @@ class WebviewProvider {
         const functionalitySelect = document.getElementById('functionalitySelect');
         const languageSelect = document.getElementById('languageSelect');
         const generateBtn = document.getElementById('generateBtn');
+        const generateTestsBtn = document.getElementById('generateTestsBtn');
         const uploadButton = document.getElementById('uploadButton');
         const status = document.getElementById('status');
         
@@ -361,8 +389,46 @@ class WebviewProvider {
         });
         
         functionalitySelect.addEventListener('change', (e) => {
-            generateBtn.disabled = !e.target.value;
+            const hasSelection = !!e.target.value;
+            generateBtn.disabled = !hasSelection;
+            
+            // TDD: Enable "Generate Tests" button when functionality is selected
+            if (generateTestsBtn) {
+                generateTestsBtn.disabled = !hasSelection;
+            }
         });
+        
+        // TDD: Set up "Generate Tests" button event listener (tests first)
+        if (generateTestsBtn) {
+            generateTestsBtn.addEventListener('click', () => {
+                const selectedIndex = functionalitySelect.value;
+                const selectedLanguage = languageSelect.value;
+                
+                if (!selectedIndex) {
+                    showStatus('Please select a functionality first!', 'error');
+                    return;
+                }
+                
+                const selectedFunctionality = window.functionalities[selectedIndex];
+                console.log('🧪 [FRONTEND] Generate Tests button clicked (TDD Mode)');
+                console.log('🧪 [FRONTEND] Functionality:', selectedFunctionality);
+                console.log('🧪 [FRONTEND] Language:', selectedLanguage);
+                console.log('🧪 [FRONTEND] TDD Mode: Tests will be generated FIRST, code will follow');
+                
+                // Show loading message
+                status.innerHTML = '<div style="color: #17a2b8; font-weight: bold;">🧪 Generating test cases (TDD Mode)... Please wait!</div>';
+                generateTestsBtn.disabled = true;
+                generateTestsBtn.textContent = 'Generating Tests...';
+                
+                // TDD: Generate tests WITHOUT code (code will be generated later)
+                vscode.postMessage({
+                    type: 'generateTests',
+                    functionality: selectedFunctionality,
+                    code: null, // TDD: No code yet, tests first
+                    language: selectedLanguage
+                });
+            });
+        }
         
         generateBtn.addEventListener('click', () => {
             const selectedIndex = functionalitySelect.value;
@@ -445,8 +511,9 @@ class WebviewProvider {
             status.innerHTML = \`<div class="status \${type}">\${message}</div>\`;
         }
         
-        function showGeneratedCode(code, functionality) {
+        function showGeneratedCode(code, functionality, message = null) {
             console.log('🔄 [FRONTEND] showGeneratedCode called with code length:', code?.length);
+            console.log('🔄 [FRONTEND] Functionality name:', functionality);
             
             // Create or update the code display section
             let codeSection = document.getElementById('codeSection');
@@ -455,19 +522,37 @@ class WebviewProvider {
                 codeSection.id = 'codeSection';
                 codeSection.innerHTML = \`
                     <div class="container">
-                        <h3>Generated Code for: \${functionality}</h3>
+                        <h3 id="codeHeader">Generated Code for: \${functionality}</h3>
                         <div class="code-container">
                             <pre><code id="generatedCode"></code></pre>
                         </div>
-                        <div style="margin-top: 10px;">
+                        <div style="margin-top: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
                             <button id="copyCodeBtn" class="btn">Copy Code</button>
-                            <button id="exportCodeBtn" class="btn" style="margin-left: 10px; background-color: #28a745;">Export to Project</button>
-                            <button id="generateTestsBtn" class="btn" style="margin-left: 10px; background-color: #17a2b8;">Generate Tests</button>
-                            <button id="verifyCodeBtn" class="btn" style="margin-left: 10px; background-color: #6f42c1;">Verify Code</button>
+                            <button id="exportCodeBtn" class="btn" style="background-color: #28a745;">Export to Project</button>
+                            <select id="testFunctionalitySelect" style="padding: 6px 10px; border: 1px solid #4a5568; border-radius: 6px; background: #1a202c; color: #e2e8f0; font-size: 13px; width: 200px;">
+                                <option value="all">All Functionalities</option>
+                            </select>
+                            <button id="verifyCodeBtn" class="btn" style="background-color: #6f42c1;">Run Tests</button>
+                            <button id="exportCsvBtn" class="btn" style="background-color: #17a2b8; display: none;">Export CSV</button>
                         </div>
                     </div>
                 \`;
                 document.body.appendChild(codeSection);
+            } else {
+                // Update the header with new functionality name
+                const codeHeader = document.getElementById('codeHeader');
+                if (codeHeader) {
+                    codeHeader.textContent = 'Generated Code for: ' + functionality;
+                    console.log('✅ [FRONTEND] Updated code header to:', functionality);
+                } else {
+                    // If header doesn't exist, find the h3 and update it
+                    const h3 = codeSection.querySelector('h3');
+                    if (h3) {
+                        h3.id = 'codeHeader';
+                        h3.textContent = 'Generated Code for: ' + functionality;
+                        console.log('✅ [FRONTEND] Updated h3 header to:', functionality);
+                    }
+                }
             }
             
             // Update the code content
@@ -518,35 +603,59 @@ class WebviewProvider {
                 };
             }
             
-            // Add test generation button event listener
-            const testBtn = document.getElementById('generateTestsBtn');
-            if (testBtn) {
-                testBtn.onclick = () => {
-                    console.log('🧪 [FRONTEND] Generate Tests button clicked');
-                    console.log('🧪 [FRONTEND] Functionality:', functionality);
-                    console.log('🧪 [FRONTEND] Code length:', code?.length);
-                    
-                    // Show loading message
-                    status.innerHTML = '<div style="color: #17a2b8; font-weight: bold;">🧪 Generating test cases... Please wait!</div>';
-                    testBtn.disabled = true;
-                    testBtn.textContent = 'Generating...';
-                    
-                    vscode.postMessage({
-                        type: 'generateTests',
-                        functionality: functionality,
-                        code: code,
-                        language: languageSelect.value
+            // Test button event listener is set up in the main initialization (around line 550)
+            // This section is only for code display, not initial setup
+            
+            // Populate test functionality dropdown - only show functionalities with test files
+            const testFunctionalitySelect = document.getElementById('testFunctionalitySelect');
+            if (testFunctionalitySelect) {
+                // Clear existing options except "All Functionalities"
+                testFunctionalitySelect.innerHTML = '<option value="all">All Functionalities</option>';
+                
+                // Use functionalitiesWithTests if provided, otherwise check window.functionalities
+                const functionalitiesToShow = message.functionalitiesWithTests || [];
+                
+                if (functionalitiesToShow.length > 0) {
+                    // Add each functionality that has a test file
+                    functionalitiesToShow.forEach((func) => {
+                        const option = document.createElement('option');
+                        option.value = func.name;
+                        option.textContent = func.name;
+                        testFunctionalitySelect.appendChild(option);
                     });
-                };
+                    console.log('✅ [FRONTEND] Populated test dropdown with', functionalitiesToShow.length, 'functionalities that have test files');
+                } else if (window.functionalities) {
+                    // Fallback: if no test files found, show all functionalities (for backward compatibility)
+                    console.log('⚠️ [FRONTEND] No test files found, showing all functionalities as fallback');
+                    window.functionalities.forEach((func, index) => {
+                        const option = document.createElement('option');
+                        option.value = index;
+                        option.textContent = func.name || 'Functionality ' + (index + 1);
+                        testFunctionalitySelect.appendChild(option);
+                    });
+                }
             }
             
             // Add verify code button event listener
             const verifyBtn = document.getElementById('verifyCodeBtn');
             if (verifyBtn) {
                 verifyBtn.onclick = () => {
-                    console.log('🔍 [FRONTEND] Verify Code button clicked');
+                    console.log('🔍 [FRONTEND] Run Tests button clicked');
                     console.log('🔍 [FRONTEND] Functionality:', functionality);
                     console.log('🔍 [FRONTEND] Code length:', code?.length);
+                    
+                    // Get selected test functionality
+                    const selectedValue = testFunctionalitySelect ? testFunctionalitySelect.value : 'all';
+                    let selectedTestFunctionality = null;
+                    
+                    if (selectedValue !== 'all') {
+                        // Find functionality by name (since we're using names as values now)
+                        if (window.functionalities) {
+                            selectedTestFunctionality = window.functionalities.find(f => f.name === selectedValue);
+                        }
+                    }
+                    
+                    console.log('🔍 [FRONTEND] Selected test functionality:', selectedTestFunctionality?.name || 'All Functionalities');
                     
                     // Show loading message
                     status.innerHTML = '<div style="color: #6f42c1; font-weight: bold;">📤 Exporting code and running tests... Please wait!</div>';
@@ -556,7 +665,22 @@ class WebviewProvider {
                     vscode.postMessage({
                         type: 'verifyCode',
                         functionality: functionality,
-                        code: code
+                        code: code,
+                        testFunctionality: selectedTestFunctionality // Pass selected functionality for test filtering
+                    });
+                };
+            }
+            
+            // Add export CSV button event listener
+            const exportCsvBtn = document.getElementById('exportCsvBtn');
+            if (exportCsvBtn) {
+                exportCsvBtn.onclick = () => {
+                    console.log('📊 [FRONTEND] Export CSV button clicked');
+                    exportCsvBtn.disabled = true;
+                    exportCsvBtn.textContent = 'Exporting...';
+                    
+                    vscode.postMessage({
+                        type: 'exportCsv'
                     });
                 };
             }
@@ -566,10 +690,11 @@ class WebviewProvider {
             console.log('✅ [FRONTEND] Code displayed successfully');
         }
         
-        function showTestResults(results, success) {
+        function showTestResults(results, success, iteration, maxIterations, iterationMessage) {
             console.log('🧪 [FRONTEND] showTestResults called');
             console.log('🧪 [FRONTEND] Success:', success);
             console.log('🧪 [FRONTEND] Results length:', results?.length);
+            console.log('🧪 [FRONTEND] Iteration:', iteration, '/', maxIterations);
             
             // Parse test results to extract pass/fail counts
             let passedTests = 0;
@@ -592,19 +717,59 @@ class WebviewProvider {
                     passedTests = 0;
                     failedTests = 1; // Mark as failed due to missing tools
                 }
-                // Check for pytest collection errors
-                else if (resultsText.includes('ERROR collecting') || resultsText.includes('ImportError') || 
-                    resultsText.includes('ModuleNotFoundError') || resultsText.includes('collected 0 items')) {
-                    // Handle pytest collection errors
+                // FIRST: Extract "collected X items" to get the actual test count
+                // This handles cases like "collected 91 items / 1 error" where tests were collected but not run
+                if (resultsText.match(/collected\s+(\d+)\s+items?/)) {
+                    const collectedMatch = resultsText.match(/collected\s+(\d+)\s+items?/);
+                    if (collectedMatch) {
+                        totalTests = parseInt(collectedMatch[1]);
+                    }
+                }
+                
+                // Check if tests actually ran (have passed/failed counts) vs collection error that prevented execution
+                // Look for actual test execution results in the output
+                const hasActualTestResults = resultsText.match(/(\d+)\s+passed.*?(\d+)\s+failed.*?in/) || 
+                                            resultsText.match(/(\d+)\s+passed.*?in/) ||
+                                            (resultsText.match(/(\d+)\s+passed/) && resultsText.match(/(\d+)\s+failed/)) ||
+                                            resultsText.includes('PASSED') || resultsText.includes('FAILED');
+                
+                // THEN: Check for pytest collection errors (tests collected but not run due to errors)
+                // Only treat as collection error if tests didn't actually run (no passed/failed counts found)
+                // If tests DID run despite collection errors, parse the actual results instead
+                if (!hasActualTestResults && (resultsText.includes('ERROR collecting') || resultsText.includes('ImportError') || 
+                    resultsText.includes('ModuleNotFoundError') || resultsText.includes('collected 0 items'))) {
+                    // Handle pytest collection errors - tests were collected but NOT run
                     if (resultsText.includes('collected 0 items')) {
                         totalTests = 0;
                         passedTests = 0;
                         failedTests = 0;
                     } else {
-                        // Collection failed due to import errors
+                        // Collection error occurred - tests were collected but not run
+                        // totalTests already set from "collected X items" above
+                        // If no tests were collected, set to 1 to indicate error
+                        if (totalTests === 0) {
                         totalTests = 1;
+                        }
                         passedTests = 0;
-                        failedTests = 1;
+                        failedTests = 0; // Collection errors prevent tests from running, so no "failed" tests
+                    }
+                }
+                // Pytest pattern: "45 passed, 3 failed in 1.23s" (final summary line - check this first)
+                else if (resultsText.match(/(\d+)\s+passed.*?(\d+)\s+failed.*?in/)) {
+                    const pytestMatch = resultsText.match(/(\d+)\s+passed.*?(\d+)\s+failed.*?in/);
+                    if (pytestMatch) {
+                        passedTests = parseInt(pytestMatch[1]);
+                        failedTests = parseInt(pytestMatch[2]);
+                        totalTests = passedTests + failedTests;
+                    }
+                }
+                // Pytest pattern: "45 passed in 1.23s" (no failures)
+                else if (resultsText.match(/(\d+)\s+passed.*?in/) && !resultsText.includes('failed')) {
+                    const passedMatch = resultsText.match(/(\d+)\s+passed.*?in/);
+                    if (passedMatch) {
+                        passedTests = parseInt(passedMatch[1]);
+                        failedTests = 0;
+                        totalTests = passedTests;
                     }
                 }
                 // Jest pattern: "Tests: 5 passed, 1 failed" or "5 passed, 1 failed"
@@ -636,7 +801,7 @@ class WebviewProvider {
                         }
                     }
                 }
-                // Pytest pattern: "5 passed, 1 failed"
+                // Pytest pattern: "5 passed, 1 failed" (without "in")
                 else if (resultsText.includes('passed') && resultsText.includes('failed')) {
                     const passedMatch = resultsText.match(/(\d+)\s+passed/);
                     const failedMatch = resultsText.match(/(\d+)\s+failed/);
@@ -644,7 +809,7 @@ class WebviewProvider {
                     if (failedMatch) failedTests = parseInt(failedMatch[1]);
                     totalTests = passedTests + failedTests;
                 }
-                // Pytest pattern: "5 passed" (no failures)
+                // Pytest pattern: "5 passed" (no failures, without "in")
                 else if (resultsText.includes('passed') && !resultsText.includes('failed')) {
                     const passedMatch = resultsText.match(/(\d+)\s+passed/);
                     if (passedMatch) {
@@ -706,8 +871,25 @@ class WebviewProvider {
                     passedTests = 0;
                     failedTests = 1;
                 }
-                // Generic pattern: look for numbers
-                else {
+                // If we found "collected X items" but haven't parsed passed/failed yet, try to infer
+                // (This is a fallback if the earlier collection check didn't set totalTests)
+                if (totalTests === 0 && resultsText.match(/collected\s+(\d+)\s+items?/)) {
+                    const collectedMatch = resultsText.match(/collected\s+(\d+)\s+items?/);
+                    if (collectedMatch) {
+                        totalTests = parseInt(collectedMatch[1]);
+                        // If we still don't have passed/failed counts, check if all passed or all failed
+                        if (resultsText.includes('passed') && !resultsText.includes('failed')) {
+                            passedTests = totalTests;
+                            failedTests = 0;
+                        } else if (resultsText.includes('failed') && !resultsText.includes('passed')) {
+                            passedTests = 0;
+                            failedTests = totalTests;
+                        }
+                    }
+                }
+                
+                // Generic pattern: look for numbers (fallback)
+                if (totalTests === 0) {
                     const numbers = resultsText.match(/\d+/g);
                     if (numbers && numbers.length >= 2) {
                         totalTests = parseInt(numbers[0]);
@@ -745,14 +927,60 @@ class WebviewProvider {
             const summaryElement = document.getElementById('testSummary');
             if (summaryElement) {
                 if (totalTests > 0) {
-                    const summaryColor = success ? '#28a745' : '#dc3545';
-                    const summaryIcon = success ? '✅' : '❌';
-                    summaryElement.style.backgroundColor = success ? '#d4edda' : '#f8d7da';
+                    let summaryColor, summaryIcon, summaryBg;
+                    const passRate = totalTests > 0 ? Math.round((passedTests / totalTests) * 100) : 0;
+                    
+                    if (failedTests === 0) {
+                        // All tests passed
+                        summaryColor = '#28a745';
+                        summaryIcon = '✅';
+                        summaryBg = '#d4edda';
+                    } else if (passedTests > 0) {
+                        // Mixed results
+                        summaryColor = '#856404';
+                        summaryIcon = '📊';
+                        summaryBg = '#fff3cd';
+                    } else {
+                        // All tests failed
+                        summaryColor = '#721c24';
+                        summaryIcon = '❌';
+                        summaryBg = '#f8d7da';
+                    }
+                    
+                    summaryElement.style.backgroundColor = summaryBg;
                     summaryElement.style.color = summaryColor;
-                    summaryElement.style.border = \`1px solid \${summaryColor}\`;
+                    summaryElement.style.border = \`2px solid \${summaryColor}\`;
+                    summaryElement.style.padding = '15px';
+                    summaryElement.style.marginBottom = '15px';
+                    summaryElement.style.borderRadius = '8px';
+                    summaryElement.style.fontSize = '16px';
+                    summaryElement.style.boxShadow = '0 2px 4px rgba(0,0,0,0.1)';
                     summaryElement.innerHTML = \`
-                        \${summaryIcon} <strong>Test Summary:</strong> 
-                        \${passedTests} passed, \${failedTests} failed (Total: \${totalTests} tests)
+                        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <span style="font-size: 1.5em;">\${summaryIcon}</span>
+                                <strong style="font-size: 1.2em;">TEST SUMMARY</strong>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 20px; flex-wrap: wrap;">
+                                <div style="text-align: center;">
+                                    <div style="color: #28a745; font-size: 2em; font-weight: bold; line-height: 1;">\${passedTests}</div>
+                                    <div style="font-size: 0.9em; margin-top: 4px;">PASSED</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="color: #dc3545; font-size: 2em; font-weight: bold; line-height: 1;">\${failedTests}</div>
+                                    <div style="font-size: 0.9em; margin-top: 4px;">FAILED</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="font-size: 2em; font-weight: bold; line-height: 1;">\${totalTests}</div>
+                                    <div style="font-size: 0.9em; margin-top: 4px;">TOTAL</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="font-size: 2em; font-weight: bold; line-height: 1;">\${passRate}%</div>
+                                    <div style="font-size: 0.9em; margin-top: 4px;">PASS RATE</div>
+                                </div>
+                            </div>
+                        </div>
+                        \${iteration !== undefined && maxIterations !== undefined ? \`<div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid \${summaryColor}; font-size: 0.9em; opacity: 0.8;">Iteration: \${iteration}/\${maxIterations}</div>\` : ''}
                     \`;
                 } else {
                     // Show raw results when parsing fails
@@ -810,7 +1038,19 @@ class WebviewProvider {
             const resultsElement = document.getElementById('testResults');
             if (resultsElement) {
                 resultsElement.className = 'language-bash';
-                resultsElement.textContent = results;
+                
+                // Add iteration header if available
+                let resultsText = results || '';
+                if (iteration !== undefined && maxIterations !== undefined) {
+                    const iterationHeader = \`\n\${'='.repeat(80)}\n🔄 ITERATION \${iteration}/\${maxIterations} - TEST RESULTS\n\${'='.repeat(80)}\n\`;
+                    if (iterationMessage) {
+                        resultsText = iterationHeader + iterationMessage + '\\n\\n' + resultsText;
+                    } else {
+                        resultsText = iterationHeader + resultsText;
+                    }
+                }
+                
+                resultsElement.textContent = resultsText;
                 
                 // Apply syntax highlighting for test output
                 if (typeof Prism !== 'undefined') {
@@ -818,12 +1058,46 @@ class WebviewProvider {
                 }
             }
             
-            // Show status message
-            const statusColor = success ? '#28a745' : '#dc3545';
-            const statusIcon = success ? '✅' : '❌';
-            const statusText = success ? 'All tests passed!' : 'Some tests failed!';
+            // Show status message with iteration info
+            let statusColor, statusIcon, statusText, statusType;
             
-            showStatus(\`\${statusIcon} \${statusText}\`, success ? 'success' : 'error');
+            // Add iteration prefix if available
+            const iterationPrefix = (iteration !== undefined && maxIterations !== undefined) ? \`[Iteration \${iteration}/\${maxIterations}] \` : '';
+            
+            if (totalTests > 0) {
+                if (failedTests === 0) {
+                    // All tests passed
+                    statusColor = '#28a745';
+                    statusIcon = '✅';
+                    statusText = \`\${iterationPrefix}All tests passed! (\${passedTests}/\${totalTests})\`;
+                    statusType = 'success';
+                } else if (passedTests > 0) {
+                    // Mixed results - some passed, some failed
+                    statusColor = '#ffc107';
+                    statusIcon = '📊';
+                    statusText = \`\${iterationPrefix}Test results: \${passedTests} passed, \${failedTests} failed (\${totalTests} total)\`;
+                    statusType = 'warning';
+                } else {
+                    // All tests failed
+                    statusColor = '#dc3545';
+                    statusIcon = '❌';
+                    statusText = \`\${iterationPrefix}All tests failed (\${failedTests}/\${totalTests})\`;
+                    statusType = 'error';
+                }
+            } else {
+                // No tests parsed
+                statusColor = '#6c757d';
+                statusIcon = 'ℹ️';
+                statusText = iterationPrefix + 'Test results available';
+                statusType = 'info';
+            }
+            
+            // Use iteration message if provided
+            if (iterationMessage) {
+                statusText = iterationMessage;
+            }
+            
+            showStatus(\`\${statusIcon} \${statusText}\`, statusType);
             console.log('✅ [FRONTEND] Test results displayed successfully');
         }
         
@@ -834,11 +1108,30 @@ class WebviewProvider {
             console.log('🔍 [FRONTEND] First functionality:', functionalities?.[0]);
             console.log('🔍 [FRONTEND] First functionality name:', functionalities?.[0]?.name);
             
-            // Store functionalities globally for access in generate button
-            window.functionalities = functionalities;
+            // Deduplicate functionalities by name (case-insensitive) on frontend as well
+            const seen = new Set();
+            const uniqueFunctionalities = [];
+            functionalities.forEach((func, index) => {
+                if (!func || typeof func !== 'object' || !func.name) {
+                    console.log('⚠️ [FRONTEND] Skipping invalid functionality at index ' + index);
+                    return;
+                }
+                const nameKey = func.name.toLowerCase().trim();
+                if (nameKey && !seen.has(nameKey)) {
+                    seen.add(nameKey);
+                    uniqueFunctionalities.push(func);
+                } else if (nameKey) {
+                    console.log('⚠️ [FRONTEND] Duplicate functionality skipped: "' + func.name + '"');
+                }
+            });
+            
+            console.log('✅ [FRONTEND] Deduplicated: ' + functionalities.length + ' → ' + uniqueFunctionalities.length + ' functionalities');
+            
+            // Store unique functionalities globally for access in generate button
+            window.functionalities = uniqueFunctionalities;
             
             functionalitySelect.innerHTML = '<option value="">Choose a functionality...</option>';
-            functionalities.forEach((func, index) => {
+            uniqueFunctionalities.forEach((func, index) => {
                 console.log('📋 [FRONTEND] Adding functionality ' + (index + 1) + ':', func);
                 console.log('🔍 [FRONTEND] Function ' + (index + 1) + ' name:', func.name);
                 console.log('🔍 [FRONTEND] Function ' + (index + 1) + ' type:', typeof func.name);
@@ -849,7 +1142,7 @@ class WebviewProvider {
                 functionalitySelect.appendChild(option);
             });
             functionalitySelector.style.display = 'block';
-            console.log('✅ [FRONTEND] Dropdown populated with', functionalities.length, 'functionalities');
+            console.log('✅ [FRONTEND] Dropdown populated with', uniqueFunctionalities.length, 'unique functionalities');
         }
         
         // Listen for messages from extension
@@ -861,7 +1154,7 @@ class WebviewProvider {
             const message = event.data;
             switch (message.type) {
                 case 'updateStatus':
-                    showStatus(message.message, message.statusType);
+                        showStatus(message.message, message.statusType);
                     break;
                 case 'srsParsed':
                     console.log('📋 [FRONTEND] SRS parsed message received, functionalities:', message.functionalities);
@@ -883,21 +1176,24 @@ class WebviewProvider {
                     generateBtn.textContent = 'Generate Code';
                     status.innerHTML = '<div style="color: #28a745; font-weight: bold;">✅ Code generated successfully!</div>';
                     
-                    showGeneratedCode(message.code, message.functionality);
+                    showGeneratedCode(message.code, message.functionality, message);
                     break;
                 case 'testResults':
                     console.log('🧪 [FRONTEND] Test results received');
                     console.log('🧪 [FRONTEND] Test success:', message.success);
                     console.log('🧪 [FRONTEND] Exit code:', message.exitCode);
+                    console.log('🧪 [FRONTEND] Iteration:', message.iteration);
+                    console.log('🧪 [FRONTEND] Max iterations:', message.maxIterations);
                     
                     // Reset verify button
                     const verifyBtnReset = document.getElementById('verifyCodeBtn');
                     if (verifyBtnReset) {
                         verifyBtnReset.disabled = false;
-                        verifyBtnReset.textContent = 'Verify Code';
+                        verifyBtnReset.textContent = 'Run Tests';
                     }
                     
-                    showTestResults(message.results, message.success);
+                    // Show test results with iteration info if available
+                    showTestResults(message.results, message.success, message.iteration, message.maxIterations, message.message);
                     break;
                 case 'exportSuccess':
                     console.log('📤 [FRONTEND] Export success received');
@@ -911,14 +1207,151 @@ class WebviewProvider {
                     
                     showStatus(message.message, 'success');
                     break;
+                case 'testResultsStored':
+                    console.log('💾 [FRONTEND] Test results stored, hasResults:', message.hasResults);
+                    
+                    // Show/hide export CSV button based on whether we have results
+                    const exportCsvBtn = document.getElementById('exportCsvBtn');
+                    if (exportCsvBtn) {
+                        if (message.hasResults) {
+                            exportCsvBtn.style.display = 'inline-block';
+                        } else {
+                            exportCsvBtn.style.display = 'none';
+                        }
+                    }
+                    break;
+                case 'testResultsSummary':
+                    console.log('📊 [FRONTEND] Test results summary received');
+                    console.log('📊 [FRONTEND] Initial:', message.initialTestCounts);
+                    console.log('📊 [FRONTEND] Final:', message.finalTestCounts);
+                    
+                    // Display summary with initial and final metrics
+                    if (message.initialTestCounts && message.finalTestCounts) {
+                        const initial = message.initialTestCounts;
+                        const final = message.finalTestCounts;
+                        const improvement = initial.failed - final.failed;
+                        
+                        // Update test results section with summary
+                        const testSection = document.getElementById('testSection');
+                        if (testSection) {
+                            // Remove existing summary if any
+                            const existingSummary = testSection.querySelector('[data-test-summary]');
+                            if (existingSummary) {
+                                existingSummary.remove();
+                            }
+                            
+                            const summaryDiv = document.createElement('div');
+                            summaryDiv.setAttribute('data-test-summary', 'true');
+                            summaryDiv.style.cssText = 'margin-top: 20px; padding: 15px; background: #1a202c; border: 2px solid #3182ce; border-radius: 8px; font-family: monospace;';
+                            const iterationsText = message.iterations > 0 ? \` (after \${message.iterations} iteration\${message.iterations === 1 ? '' : 's'})\` : '';
+                            summaryDiv.innerHTML = \`
+                                <div style="color: #90cdf4; font-weight: bold; margin-bottom: 10px; font-size: 1.1em;">📊 TEST RESULTS SUMMARY</div>
+                                <div style="color: #e2e8f0; margin-bottom: 8px;">
+                                    <span style="color: #90cdf4;">Initial Run:</span> 
+                                    <span style="color: #68d391;">\${initial.passed} passed</span>, 
+                                    <span style="color: #feb2b2;">\${initial.failed} failed</span> 
+                                    (<span style="color: #cbd5e0;">\${initial.total} total</span>)
+                                </div>
+                                <div style="color: #e2e8f0; margin-bottom: 8px;">
+                                    <span style="color: #90cdf4;">Final Run\${iterationsText}:</span> 
+                                    <span style="color: #68d391;">\${final.passed} passed</span>, 
+                                    <span style="color: #feb2b2;">\${final.failed} failed</span> 
+                                    (<span style="color: #cbd5e0;">\${final.total} total</span>)
+                                </div>
+                                \${improvement > 0 ? \`<div style="color: #68d391; margin-top: 8px; font-weight: bold;">✅ Improvement: \${improvement} test\${improvement === 1 ? '' : 's'} fixed</div>\` : ''}
+                            \`;
+                            testSection.appendChild(summaryDiv);
+                        }
+                    }
+                    break;
+                case 'verificationCompleted':
+                    console.log('✅ [FRONTEND] Verification completed');
+                    console.log('📊 [FRONTEND] Initial:', message.initialTestCounts);
+                    console.log('📊 [FRONTEND] Final:', message.finalTestCounts);
+                    
+                    // Display summary if available
+                    if (message.initialTestCounts && message.finalTestCounts) {
+                        const initial = message.initialTestCounts;
+                        const final = message.finalTestCounts;
+                        const improvement = initial.failed - final.failed;
+                        
+                        // Update test results section with summary
+                        const testSection = document.getElementById('testSection');
+                        if (testSection) {
+                            // Remove existing summary if any
+                            const existingSummary = testSection.querySelector('[data-test-summary]');
+                            if (existingSummary) {
+                                existingSummary.remove();
+                            }
+                            
+                            const summaryDiv = document.createElement('div');
+                            summaryDiv.setAttribute('data-test-summary', 'true');
+                            summaryDiv.style.cssText = 'margin-top: 20px; padding: 15px; background: #1a202c; border: 2px solid #28a745; border-radius: 8px; font-family: monospace;';
+                            const iterationsText = message.iteration > 0 ? \` (after \${message.iteration} iteration\${message.iteration === 1 ? '' : 's'})\` : '';
+                            summaryDiv.innerHTML = \`
+                                <div style="color: #68d391; font-weight: bold; margin-bottom: 10px; font-size: 1.1em;">📊 TEST RESULTS SUMMARY</div>
+                                <div style="color: #e2e8f0; margin-bottom: 8px;">
+                                    <span style="color: #90cdf4;">Initial Run:</span> 
+                                    <span style="color: #68d391;">\${initial.passed} passed</span>, 
+                                    <span style="color: #feb2b2;">\${initial.failed} failed</span> 
+                                    (<span style="color: #cbd5e0;">\${initial.total} total</span>)
+                                </div>
+                                <div style="color: #e2e8f0; margin-bottom: 8px;">
+                                    <span style="color: #90cdf4;">Final Run\${iterationsText}:</span> 
+                                    <span style="color: #68d391;">\${final.passed} passed</span>, 
+                                    <span style="color: #feb2b2;">\${final.failed} failed</span> 
+                                    (<span style="color: #cbd5e0;">\${final.total} total</span>)
+                                </div>
+                                \${improvement > 0 ? \`<div style="color: #68d391; margin-top: 8px; font-weight: bold;">✅ Improvement: \${improvement} test\${improvement === 1 ? '' : 's'} fixed</div>\` : ''}
+                            \`;
+                            testSection.appendChild(summaryDiv);
+                        }
+                    }
+                    
+                    showStatus(message.message, 'success');
+                    break;
+                case 'csvExportSuccess':
+                    console.log('📊 [FRONTEND] CSV export success received');
+                    
+                    // Reset export CSV button
+                    const exportCsvBtnReset = document.getElementById('exportCsvBtn');
+                    if (exportCsvBtnReset) {
+                        exportCsvBtnReset.disabled = false;
+                        exportCsvBtnReset.textContent = 'Export CSV';
+                    }
+                    
+                    showStatus(message.message, 'success');
+                    break;
+                case 'csvExportError':
+                    console.log('❌ [FRONTEND] CSV export error received');
+                    
+                    // Reset export CSV button
+                    const exportCsvBtnError = document.getElementById('exportCsvBtn');
+                    if (exportCsvBtnError) {
+                        exportCsvBtnError.disabled = false;
+                        exportCsvBtnError.textContent = 'Export CSV';
+                    }
+                    
+                    showStatus(message.message, 'error');
+                    break;
                 case 'testGenerated':
                     console.log('🧪 [FRONTEND] Test generation success received');
+                    console.log('🔍 [FRONTEND] TDD Mode:', message.isTDDMode);
                     
                     // Reset test generation button
                     const testBtnReset = document.getElementById('generateTestsBtn');
                     if (testBtnReset) {
                         testBtnReset.disabled = false;
                         testBtnReset.textContent = 'Generate Tests';
+                    }
+                    
+                    // TDD: Enable code generation button after tests are generated
+                    if (message.isTDDMode) {
+                        const generateBtn = document.getElementById('generateCodeBtn');
+                        if (generateBtn) {
+                            generateBtn.disabled = false;
+                            console.log('✅ [TDD] Code generation button enabled');
+                        }
                     }
                     
                     showStatus(message.message, 'success');
@@ -930,7 +1363,7 @@ class WebviewProvider {
                     const verifyBtnStarted = document.getElementById('verifyCodeBtn');
                     if (verifyBtnStarted) {
                         verifyBtnStarted.disabled = false;
-                        verifyBtnStarted.textContent = 'Verify Code';
+                        verifyBtnStarted.textContent = 'Run Tests';
                     }
                     
                     showStatus(message.message, 'info');
@@ -955,7 +1388,7 @@ class WebviewProvider {
                     const verifyBtnError = document.getElementById('verifyCodeBtn');
                     if (verifyBtnError) {
                         verifyBtnError.disabled = false;
-                        verifyBtnError.textContent = 'Verify Code';
+                        verifyBtnError.textContent = 'Run Tests';
                     }
                     
                     showStatus(message.message, 'error');
@@ -1033,6 +1466,42 @@ class WebviewProvider {
                 this.embeddedPackets = embeddedPackets;
                 console.log('💾 [EXTENSION] Stored', this.embeddedPackets.length, 'embedded packets');
                 
+                // Display all embedded functionalities JSON (complete structure)
+                console.log('\n📦 [EMBEDDED-FUNCTIONALITIES] ==========================================');
+                console.log('📦 [EMBEDDED-FUNCTIONALITIES] Complete Embedded Functionalities JSON:');
+                console.log('📦 [EMBEDDED-FUNCTIONALITIES] Total Count:', embeddedPackets.length);
+                console.log('📦 [EMBEDDED-FUNCTIONALITIES] ==========================================\n');
+                
+                embeddedPackets.forEach((packet, index) => {
+                    console.log(`\n📦 [FUNCTIONALITY-${index + 1}/${embeddedPackets.length}] ${packet.name || 'Unnamed'}`);
+                    console.log('─'.repeat(60));
+                    
+                    // Display complete functionality data
+                    const fullPacket = {
+                        name: packet.name || 'N/A',
+                        description: packet.description || 'N/A',
+                        useCases: packet.useCases || [],
+                        activityDiagrams: packet.activityDiagrams || [],
+                        context: packet.context || 'N/A',
+                        requirements: packet.requirements || [],
+                        dependencies: packet.dependencies || [],
+                        embedding: packet.embedding ? {
+                            dimensions: packet.embedding.length,
+                            sample: packet.embedding.slice(0, 5), // Show first 5 values as sample
+                            note: 'Full vector has ' + packet.embedding.length + ' dimensions'
+                        } : 'No embedding'
+                    };
+                    
+                    console.log(JSON.stringify(fullPacket, null, 2));
+                    console.log('─'.repeat(60));
+                });
+                
+                console.log('\n📦 [EMBEDDED-FUNCTIONALITIES] ==========================================');
+                console.log('📦 [EMBEDDED-FUNCTIONALITIES] Summary:');
+                console.log('📦 [EMBEDDED-FUNCTIONALITIES] - Total functionalities:', embeddedPackets.length);
+                console.log('📦 [EMBEDDED-FUNCTIONALITIES] - With embeddings:', embeddedPackets.filter(p => p.embedding).length);
+                console.log('📦 [EMBEDDED-FUNCTIONALITIES] ==========================================\n');
+                
                 console.log('📤 [EXTENSION] About to send srsParsed message to webview');
                 console.log('📤 [EXTENSION] Functionalities to send:', functionalityPackets.length);
                 console.log('📤 [EXTENSION] First functionality:', functionalityPackets[0]);
@@ -1049,7 +1518,7 @@ class WebviewProvider {
                 }
                 
                 // Send only the basic functionality info to frontend (without embeddings)
-                const frontendFunctionalities = functionalityPackets.map(packet => ({
+                let frontendFunctionalities = functionalityPackets.map(packet => ({
                     name: packet.name,
                     description: packet.description,
                     useCases: packet.useCases,
@@ -1059,12 +1528,31 @@ class WebviewProvider {
                     dependencies: packet.dependencies
                 }));
                 
+                // Final deduplication check before sending to frontend
+                const seen = new Set();
+                frontendFunctionalities = frontendFunctionalities.filter(func => {
+                    try {
+                        if (!func || typeof func !== 'object' || !func.name) {
+                            return false;
+                        }
+                        const nameKey = func.name.toLowerCase().trim();
+                        if (nameKey && !seen.has(nameKey)) {
+                            seen.add(nameKey);
+                            return true;
+                        }
+                        return false;
+                    } catch (error) {
+                        console.log(`⚠️ [EXTENSION] Error filtering functionality: ${error.message}`);
+                        return false;
+                    }
+                });
+                
                 console.log('📤 [EXTENSION] Frontend functionalities (without embeddings):', frontendFunctionalities.length);
                 console.log('📤 [EXTENSION] First frontend functionality:', frontendFunctionalities[0]);
                 
                 this.panel?.webview.postMessage({
                     type: 'srsParsed',
-                    content: 'SRS parsed successfully! Found ' + functionalityPackets.length + ' functionality packets with context and embeddings.',
+                    content: 'SRS parsed successfully! Found ' + frontendFunctionalities.length + ' unique functionality packets with context and embeddings.',
                     functionalities: frontendFunctionalities
                 });
                 console.log('📤 [EXTENSION] SRS parsed response sent to webview');
@@ -1094,11 +1582,30 @@ class WebviewProvider {
                 functionalityPackets = await this.extractFunctionalityPackets(textContent);
                 
                 if (functionalityPackets && functionalityPackets.length > 0) {
+                    // Final deduplication check
+                    const seen = new Set();
+                    functionalityPackets = functionalityPackets.filter(func => {
+                        try {
+                            if (!func || typeof func !== 'object' || !func.name) {
+                                return false;
+                            }
+                            const nameKey = func.name.toLowerCase().trim();
+                            if (nameKey && !seen.has(nameKey)) {
+                                seen.add(nameKey);
+                                return true;
+                            }
+                            return false;
+                        } catch (error) {
+                            console.log(`⚠️ [EXTENSION] Error filtering functionality: ${error.message}`);
+                            return false;
+                        }
+                    });
+                    
                     this.embeddedPackets = await this.createEmbeddingsForPackets(functionalityPackets);
                     
                     this.panel?.webview.postMessage({
                         type: 'srsParsed',
-                        content: 'SRS parsed successfully! Found ' + functionalityPackets.length + ' functionality packets.',
+                        content: 'SRS parsed successfully! Found ' + functionalityPackets.length + ' unique functionality packets.',
                         functionalities: functionalityPackets
                     });
                 }
@@ -1164,6 +1671,9 @@ class WebviewProvider {
         
         const allFunctionalities = [];
         
+        // Prepare data structure to save chunks and extracted functionalities
+        const chunkAnalysisData = [];
+        
         for (let i = 0; i < textChunks.length; i++) {
             console.log(`🔄 [LLM-PARSER] Processing text chunk ${i + 1}/${textChunks.length}`);
             
@@ -1215,6 +1725,15 @@ EXTRACT FUNCTIONALITIES FROM THIS TEXT:`;
                 
                 const functionalities = JSON.parse(jsonContent);
                 
+                // Store chunk and extracted functionalities for saving
+                chunkAnalysisData.push({
+                    chunkNumber: i + 1,
+                    totalChunks: textChunks.length,
+                    chunkContent: textChunks[i],
+                    extractedFunctionalities: Array.isArray(functionalities) ? functionalities : [],
+                    chunkLength: textChunks[i].length
+                });
+                
                 if (Array.isArray(functionalities) && functionalities.length > 0) {
                     console.log(`✅ [LLM-PARSER] Found ${functionalities.length} functionalities in text chunk ${i + 1}`);
                     allFunctionalities.push(...functionalities);
@@ -1223,11 +1742,226 @@ EXTRACT FUNCTIONALITIES FROM THIS TEXT:`;
                 }
             } catch (error) {
                 console.log(`⚠️ [LLM-PARSER] Error processing text chunk ${i + 1}: ${error.message}`);
+                
+                // Store chunk even if extraction failed
+                chunkAnalysisData.push({
+                    chunkNumber: i + 1,
+                    totalChunks: textChunks.length,
+                    chunkContent: textChunks[i],
+                    extractedFunctionalities: [],
+                    error: error.message,
+                    chunkLength: textChunks[i].length
+                });
             }
         }
         
+        // Save chunks and extracted functionalities to a text file
+        console.log(`💾 [LLM-PARSER] Preparing to save chunk analysis (${chunkAnalysisData.length} chunks)...`);
+        await this.saveChunkAnalysis(chunkAnalysisData);
+        console.log(`💾 [LLM-PARSER] Chunk analysis save completed`);
+        
         console.log(`🎯 [LLM-PARSER] Total functionalities found: ${allFunctionalities.length}`);
-        return allFunctionalities;
+        
+        // Deduplicate functionalities by name (case-insensitive)
+        const seen = new Set();
+        const uniqueFunctionalities = [];
+        for (const func of allFunctionalities) {
+            try {
+                if (!func || typeof func !== 'object') {
+                    console.log(`⚠️ [LLM-PARSER] Skipping invalid functionality object`);
+                    continue;
+                }
+                const nameKey = func.name?.toLowerCase()?.trim();
+                if (nameKey && !seen.has(nameKey)) {
+                    seen.add(nameKey);
+                    uniqueFunctionalities.push(func);
+                } else if (nameKey) {
+                    console.log(`⚠️ [LLM-PARSER] Duplicate functionality skipped: "${func.name}"`);
+                } else {
+                    console.log(`⚠️ [LLM-PARSER] Skipping functionality with missing or invalid name`);
+                }
+            } catch (error) {
+                console.log(`⚠️ [LLM-PARSER] Error processing functionality: ${error.message}`);
+            }
+        }
+        
+        console.log(`✅ [LLM-PARSER] Unique functionalities after deduplication: ${uniqueFunctionalities.length}`);
+        return uniqueFunctionalities;
+    }
+
+    async saveChunkAnalysis(chunkAnalysisData) {
+        console.log(`💾 [LLM-PARSER] saveChunkAnalysis called with ${chunkAnalysisData.length} chunks`);
+        try {
+            // Get workspace folder
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            console.log(`💾 [LLM-PARSER] Workspace folders: ${workspaceFolders ? workspaceFolders.length : 0}`);
+            if (!workspaceFolders || workspaceFolders.length === 0) {
+                console.log('⚠️ [LLM-PARSER] No workspace folder found, skipping chunk analysis save');
+                vscode.window.showWarningMessage('Cannot save chunk analysis: No workspace folder open');
+                return;
+            }
+
+            const workspacePath = workspaceFolders[0].uri.fsPath;
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+            const fileName = `srs_chunk_analysis_${timestamp}.txt`;
+            const filePath = path.join(workspacePath, fileName);
+
+            // Build the analysis text
+            let analysisText = '='.repeat(80) + '\n';
+            analysisText += 'SRS CHUNK ANALYSIS REPORT\n';
+            analysisText += `Generated: ${new Date().toLocaleString()}\n`;
+            analysisText += `Total Chunks: ${chunkAnalysisData.length}\n`;
+            analysisText += '='.repeat(80) + '\n\n';
+
+            let totalFunctionalities = 0;
+            
+            for (const chunkData of chunkAnalysisData) {
+                analysisText += '='.repeat(80) + '\n';
+                analysisText += `CHUNK ${chunkData.chunkNumber} of ${chunkData.totalChunks}\n`;
+                analysisText += `Chunk Length: ${chunkData.chunkLength} characters\n`;
+                
+                if (chunkData.error) {
+                    analysisText += `❌ ERROR: ${chunkData.error}\n`;
+                } else {
+                    analysisText += `✅ Extracted ${chunkData.extractedFunctionalities.length} functionality/functionalities\n`;
+                    totalFunctionalities += chunkData.extractedFunctionalities.length;
+                }
+                
+                analysisText += '='.repeat(80) + '\n\n';
+                
+                // Chunk Content
+                analysisText += 'CHUNK CONTENT:\n';
+                analysisText += '-'.repeat(80) + '\n';
+                analysisText += chunkData.chunkContent + '\n';
+                analysisText += '-'.repeat(80) + '\n\n';
+                
+                // Extracted Functionalities
+                if (chunkData.extractedFunctionalities.length > 0) {
+                    analysisText += 'EXTRACTED FUNCTIONALITIES:\n';
+                    analysisText += '-'.repeat(80) + '\n';
+                    
+                    chunkData.extractedFunctionalities.forEach((func, index) => {
+                        analysisText += `\n[Functionality ${index + 1}]\n`;
+                        analysisText += `Name: ${func.name || 'N/A'}\n`;
+                        analysisText += `Description: ${func.description || 'N/A'}\n`;
+                        
+                        if (func.useCases && func.useCases.length > 0) {
+                            analysisText += `Use Cases:\n`;
+                            func.useCases.forEach((uc, i) => {
+                                analysisText += `  ${i + 1}. ${uc}\n`;
+                            });
+                        }
+                        
+                        if (func.requirements && func.requirements.length > 0) {
+                            analysisText += `Requirements:\n`;
+                            func.requirements.forEach((req, i) => {
+                                analysisText += `  ${i + 1}. ${req}\n`;
+                            });
+                        }
+                        
+                        if (func.dependencies && func.dependencies.length > 0) {
+                            analysisText += `Dependencies: ${func.dependencies.join(', ')}\n`;
+                        }
+                        
+                        if (func.activityDiagrams && func.activityDiagrams.length > 0) {
+                            analysisText += `Activity Diagrams:\n`;
+                            func.activityDiagrams.forEach((ad, i) => {
+                                analysisText += `  ${i + 1}. ${ad}\n`;
+                            });
+                        }
+                        
+                        if (func.context) {
+                            analysisText += `Context: ${func.context}\n`;
+                        }
+                        
+                        analysisText += '\n';
+                    });
+                    
+                    analysisText += '-'.repeat(80) + '\n\n';
+                } else if (!chunkData.error) {
+                    analysisText += 'EXTRACTED FUNCTIONALITIES: None found in this chunk\n';
+                    analysisText += '-'.repeat(80) + '\n\n';
+                }
+                
+                analysisText += '\n';
+            }
+
+            // Summary
+            analysisText += '\n' + '='.repeat(80) + '\n';
+            analysisText += 'SUMMARY\n';
+            analysisText += '='.repeat(80) + '\n';
+            analysisText += `Total Chunks Processed: ${chunkAnalysisData.length}\n`;
+            analysisText += `Total Functionalities Extracted: ${totalFunctionalities}\n`;
+            analysisText += `Average Functionalities per Chunk: ${(totalFunctionalities / chunkAnalysisData.length).toFixed(2)}\n`;
+            
+            const chunksWithFunctionalities = chunkAnalysisData.filter(c => c.extractedFunctionalities.length > 0).length;
+            analysisText += `Chunks with Functionalities: ${chunksWithFunctionalities} of ${chunkAnalysisData.length}\n`;
+            
+            const chunksWithErrors = chunkAnalysisData.filter(c => c.error).length;
+            if (chunksWithErrors > 0) {
+                analysisText += `Chunks with Errors: ${chunksWithErrors}\n`;
+            }
+            
+            analysisText += '='.repeat(80) + '\n';
+
+            // Write to file
+            console.log(`💾 [LLM-PARSER] Attempting to save chunk analysis...`);
+            console.log(`💾 [LLM-PARSER] Workspace path: ${workspacePath}`);
+            console.log(`💾 [LLM-PARSER] File name: ${fileName}`);
+            console.log(`💾 [LLM-PARSER] Full path: ${filePath}`);
+            console.log(`💾 [LLM-PARSER] Analysis text length: ${analysisText.length} characters`);
+            
+            fs.writeFileSync(filePath, analysisText, 'utf8');
+            console.log(`✅ [LLM-PARSER] Chunk analysis saved successfully to: ${filePath}`);
+            
+            // Verify file was created
+            if (fs.existsSync(filePath)) {
+                const stats = fs.statSync(filePath);
+                console.log(`✅ [LLM-PARSER] File verified: ${stats.size} bytes`);
+            } else {
+                console.error(`❌ [LLM-PARSER] File was not created at: ${filePath}`);
+            }
+            
+            // Show notification to user with full path
+            const displayPath = filePath.length > 60 ? `...${filePath.slice(-60)}` : filePath;
+            vscode.window.showInformationMessage(
+                `SRS chunk analysis saved: ${fileName}\nLocation: ${displayPath}`,
+                'Open File',
+                'Show in Explorer'
+            ).then(selection => {
+                if (selection === 'Open File') {
+                    vscode.workspace.openTextDocument(filePath).then(doc => {
+                        vscode.window.showTextDocument(doc);
+                    }).catch(err => {
+                        console.error(`❌ [LLM-PARSER] Failed to open file: ${err.message}`);
+                        vscode.window.showErrorMessage(`Failed to open file: ${err.message}`);
+                    });
+                } else if (selection === 'Show in Explorer') {
+                    // Open file in system file explorer
+                    const { exec } = require('child_process');
+                    const platform = process.platform;
+                    let command;
+                    if (platform === 'win32') {
+                        command = `explorer /select,"${filePath}"`;
+                    } else if (platform === 'darwin') {
+                        command = `open -R "${filePath}"`;
+                    } else {
+                        command = `xdg-open "${path.dirname(filePath)}"`;
+                    }
+                    exec(command, (error) => {
+                        if (error) {
+                            console.error(`❌ [LLM-PARSER] Failed to show in explorer: ${error.message}`);
+                        }
+                    });
+                }
+            });
+        } catch (error) {
+            console.error(`❌ [LLM-PARSER] Failed to save chunk analysis: ${error.message}`);
+            console.error(`❌ [LLM-PARSER] Stack trace: ${error.stack}`);
+            // Show error to user
+            vscode.window.showErrorMessage(`Failed to save chunk analysis: ${error.message}`);
+            // Don't throw - this is a non-critical feature
+        }
     }
 
     async analyzeBase64Content(base64Content) {
@@ -1492,6 +2226,38 @@ EXTRACT FUNCTIONALITIES NOW:`;
         }
         
         console.log('✅ [EMBEDDINGS] Created embeddings for', embeddedPackets.length, 'packets');
+        
+        // Display all embedded packets JSON structure (complete)
+        console.log('\n📦 [EMBEDDED-PACKETS] ==========================================');
+        console.log('📦 [EMBEDDED-PACKETS] Complete Embedded Packets JSON:');
+        console.log('📦 [EMBEDDED-PACKETS] Total Count:', embeddedPackets.length);
+        console.log('📦 [EMBEDDED-PACKETS] ==========================================\n');
+        
+        embeddedPackets.forEach((packet, index) => {
+            console.log(`\n📦 [PACKET-${index + 1}/${embeddedPackets.length}] ${packet.name || 'Unnamed'}`);
+            console.log('─'.repeat(60));
+            
+            const fullPacketInfo = {
+                name: packet.name || 'N/A',
+                description: packet.description || 'N/A',
+                useCases: packet.useCases || [],
+                activityDiagrams: packet.activityDiagrams || [],
+                context: packet.context || 'N/A',
+                requirements: packet.requirements || [],
+                dependencies: packet.dependencies || [],
+                embedding: packet.embedding ? {
+                    dimensions: packet.embedding.length,
+                    sample: packet.embedding.slice(0, 5), // Show first 5 values
+                    note: 'Full vector: ' + packet.embedding.length + ' dimensions'
+                } : 'No embedding'
+            };
+            
+            console.log(JSON.stringify(fullPacketInfo, null, 2));
+            console.log('─'.repeat(60));
+        });
+        
+        console.log('\n📦 [EMBEDDED-PACKETS] ==========================================\n');
+        
         return embeddedPackets;
     }
 
@@ -1598,10 +2364,25 @@ EXTRACT FUNCTIONALITIES NOW:`;
         console.log('🔍 [EXTENSION] Functionality name:', functionality?.name);
         console.log('🔍 [EXTENSION] Selected language:', language);
         
+        // Start timing at the VERY BEGINNING (when button is clicked)
+        const startTime = new Date();
+        const startTimeISO = startTime.toISOString();
+        const startTimeFormatted = startTime.toLocaleString();
+        console.log(`⏱️ [CODE-GEN] Code generation started at: ${startTimeFormatted}`);
+        
         try {
             // Extract the name from the functionality object
             const functionalityName = functionality.name || functionality;
             console.log('🔍 [EXTENSION] Using functionality name:', functionalityName);
+            
+            // Initialize timing store for this functionality if not exists
+            if (!this.generationTimingStore[functionalityName]) {
+                this.generationTimingStore[functionalityName] = {};
+            }
+            this.generationTimingStore[functionalityName].codeGen = {
+                startTime: startTimeISO,
+                startTimeFormatted: startTimeFormatted
+            };
             
             // Find the embedded packet for this functionality
             const packet = this.getEmbeddedPacketByName(functionalityName);
@@ -1612,20 +2393,73 @@ EXTRACT FUNCTIONALITIES NOW:`;
             
             console.log('📦 [EXTENSION] Found embedded packet:', packet.name);
             
-            // Generate code using the packet context
-            const code = await this.generateCodeWithLLM(packet, language);
+            // Step 1: Get or generate contract (should already exist if tests were generated)
+            let contract = this.generatedContracts[functionalityName];
+            if (!contract) {
+                console.log('📋 [CONTRACT] Contract not found, generating now...');
+                contract = await this.generateContract(packet, language);
+                this.generatedContracts[functionalityName] = contract;
+            } else {
+                console.log('📋 [CONTRACT] Using existing contract for code generation');
+            }
             
-            console.log('✅ [EXTENSION] Code generated successfully');
+            // Step 2: Generate code using contract and packet (independent of tests, but aligned via contract)
+            // Pass both contract (for structure) and packet (for SRS context/requirements)
+            const code = await this.generateCodeWithLLM(contract, packet, language);
             
-            // Show the generated code
+            // Get functionalities that have test files for the dropdown
+            const functionalitiesWithTests = this.getFunctionalitiesWithTestFiles();
+            
+            // Show the generated code (this is when user sees the results)
+            // Always in TDD mode (contract-first workflow)
             this.panel?.webview.postMessage({
                 type: 'codeGenerated',
                 code: code,
-                functionality: functionalityName
+                functionality: functionalityName,
+                isTDDMode: true,
+                functionalitiesWithTests: functionalitiesWithTests // Send list of functionalities with test files
             });
             
+            // End timing RIGHT AFTER user sees the results (includes everything: contract gen, code gen, UI update)
+            const endTime = new Date();
+            const endTimeISO = endTime.toISOString();
+            const endTimeFormatted = endTime.toLocaleString();
+            const duration = endTime - startTime; // Duration in milliseconds
+            const durationSeconds = (duration / 1000).toFixed(2);
+            const durationFormatted = this.formatDuration(duration);
+            
+            // Store timing data
+            this.generationTimingStore[functionalityName].codeGen.endTime = endTimeISO;
+            this.generationTimingStore[functionalityName].codeGen.endTimeFormatted = endTimeFormatted;
+            this.generationTimingStore[functionalityName].codeGen.duration = duration;
+            this.generationTimingStore[functionalityName].codeGen.durationSeconds = durationSeconds;
+            this.generationTimingStore[functionalityName].codeGen.durationFormatted = durationFormatted;
+            
+            console.log(`✅ [EXTENSION] Code generated successfully`);
+            console.log(`⏱️ [CODE-GEN] Code generation completed at: ${endTimeFormatted}`);
+            console.log(`⏱️ [CODE-GEN] Total time (button click to results): ${durationFormatted} (${durationSeconds} seconds)`);
+            
         } catch (error) {
+            // End timing even on error
+            const endTime = new Date();
+            const endTimeISO = endTime.toISOString();
+            const endTimeFormatted = endTime.toLocaleString();
+            const duration = endTime - startTime;
+            const durationSeconds = (duration / 1000).toFixed(2);
+            const durationFormatted = this.formatDuration(duration);
+            
+            const functionalityName = functionality?.name || functionality;
+            if (this.generationTimingStore[functionalityName] && this.generationTimingStore[functionalityName].codeGen) {
+                this.generationTimingStore[functionalityName].codeGen.endTime = endTimeISO;
+                this.generationTimingStore[functionalityName].codeGen.endTimeFormatted = endTimeFormatted;
+                this.generationTimingStore[functionalityName].codeGen.duration = duration;
+                this.generationTimingStore[functionalityName].codeGen.durationSeconds = durationSeconds;
+                this.generationTimingStore[functionalityName].codeGen.durationFormatted = durationFormatted;
+                this.generationTimingStore[functionalityName].codeGen.error = true;
+            }
+            
             console.error('❌ [EXTENSION] Code generation failed:', error);
+            console.log(`⏱️ [CODE-GEN] Code generation failed after: ${durationFormatted} (${durationSeconds} seconds)`);
             this.panel?.webview.postMessage({
                 type: 'showError',
                 message: 'Failed to generate code: ' + error.message
@@ -1633,31 +2467,219 @@ EXTRACT FUNCTIONALITIES NOW:`;
         }
     }
 
-    async generateCodeWithLLM(packet, language = 'javascript') {
-        console.log('🤖 [EXTENSION] Generating code for packet:', packet.name);
+    async generateContract(packet, language) {
+        console.log('📋 [CONTRACT] Generating contract from embedded packet...');
+        const { ContractGenerator } = require('./contractGenerator');
+        // ContractGenerator context is optional - it's only used for extension state
+        const contractGenerator = new ContractGenerator(null);
+        return await contractGenerator.generateContract(packet, language);
+    }
+
+    async generateCodeWithLLM(contract, packet, language = 'javascript') {
+        console.log('🤖 [EXTENSION] Generating code from contract');
+        console.log('📦 [EXTENSION] Using embedded packet for SRS context');
         console.log('🔍 [EXTENSION] Target language:', language);
         
-        // Debug: Log all packet context being sent to LLM
-        console.log('📦 [CONTEXT] Full packet context being sent to LLM:');
-        console.log('📦 [CONTEXT] Name:', packet.name);
-        console.log('📦 [CONTEXT] Description:', packet.description);
-        console.log('📦 [CONTEXT] Use Cases:', packet.useCases);
-        console.log('📦 [CONTEXT] Activity Diagrams:', packet.activityDiagrams);
-        console.log('📦 [CONTEXT] Context:', packet.context);
-        console.log('📦 [CONTEXT] Requirements:', packet.requirements);
-        console.log('📦 [CONTEXT] Dependencies:', packet.dependencies);
-        console.log('📦 [CONTEXT] Has embedding:', !!packet.embedding);
-        console.log('📦 [CONTEXT] Embedding dimensions:', packet.embedding?.length || 'N/A');
+        if (!contract) {
+            throw new Error('Contract is required for code generation');
+        }
         
-        // MVC-Guided Prompt
-        const prompt = `You are a ${language.toUpperCase()} developer. Generate complete, production-ready MVC code for this functionality:
+        console.log('📋 [CONTRACT] Functionality:', contract.functionality);
+        console.log('📋 [CONTRACT] Architecture:', contract.architecture);
+        if (packet) {
+            console.log('📦 [EXTENSION] Packet context:', {
+                name: packet.name,
+                hasDescription: !!packet.description,
+                useCases: packet.useCases?.length || 0,
+                requirements: packet.requirements?.length || 0,
+                hasEmbedding: !!packet.embedding
+            });
+        }
+        
+        // Debug: Log contract structure
+        console.log('📋 [CONTRACT] Contract structure:');
+        console.log('📋 [CONTRACT] Models:', contract.file_structure?.models?.length || 0);
+        console.log('📋 [CONTRACT] Controllers:', contract.file_structure?.controllers?.length || 0);
+        console.log('📋 [CONTRACT] Total routes:', contract.file_structure?.controllers?.reduce((sum, c) => sum + (c.routes?.length || 0), 0) || 0);
+        
+        // Extract exact names from contract for strict enforcement
+        const modelNames = contract.file_structure?.models?.map(m => ({
+            class: m.class_name,
+            file: m.file_path,
+            fields: m.fields?.map(f => f.name) || [],
+            methods: m.methods?.map(m => m.name) || []
+        })) || [];
+        
+        const routeInfo = contract.file_structure?.controllers?.flatMap(c => 
+            c.routes?.map(r => ({
+                path: r.path,
+                methods: r.methods,
+                function_name: r.function_name,
+                controller_file: c.file_path
+            })) || []
+        ) || [];
+        
+        const helperFunctions = contract.file_structure?.controllers?.flatMap(c =>
+            c.helper_functions?.map(h => ({
+                name: h.name,
+                parameters: h.parameters,
+                return_type: h.return_type,
+                controller_file: c.file_path
+            })) || []
+        ) || [];
+        
+        // Contract-based prompt
+        const contractSection = `
+📋 API CONTRACT (MUST FOLLOW EXACTLY - NO VARIATIONS):
+This contract defines the EXACT structure your code must implement. Both tests and code are generated from this same contract, so you MUST follow it precisely with EXACT naming.
 
-FUNCTIONALITY: ${packet.name}
-DESCRIPTION: ${packet.description}
+${JSON.stringify(contract, null, 2)}
+
+CRITICAL REQUIREMENTS - EXACT NAMING ENFORCEMENT:
+
+1. ROUTE FUNCTION NAMES (MANDATORY - USE EXACT NAMES):
+${routeInfo.map(r => {
+    const methods = r.methods && Array.isArray(r.methods) ? r.methods.join(', ') : 'N/A';
+    return `   - Route "${r.path}" (${methods}) MUST use function name: "${r.function_name}"
+     * DO NOT split into ${r.function_name}_get() and ${r.function_name}_post()
+     * DO NOT use variations like ${r.function_name}_handler() or ${r.function_name}_route()
+     * USE EXACTLY: def ${r.function_name}():`;
+}).join('\n')}
+
+2. MODEL FIELD NAMES (MANDATORY - USE EXACT NAMES):
+${modelNames.map(m => `   - Model "${m.class}" MUST use these EXACT field names:
+     ${m.fields.map(f => `* ${f}`).join('\n     ')}
+     * DO NOT use variations (e.g., if contract says "is_verified", DO NOT use "is_email_verified")
+     * DO NOT use variations (e.g., if contract says "verification_token", DO NOT use "email_verification_token_hash")
+     * DO NOT use variations (e.g., if contract says "profile_picture", DO NOT use "profile_picture_path")`).join('\n\n')}
+
+3. MODEL METHOD NAMES (MANDATORY - USE EXACT NAMES):
+${modelNames.map(m => `   - Model "${m.class}" MUST use these EXACT method names:
+     ${m.methods.map(f => `* ${f}()`).join('\n     ')}
+     * DO NOT create methods not in this list
+     * DO NOT use variations of these names`).join('\n\n')}
+
+4. HELPER FUNCTION NAMES (MANDATORY - USE EXACT NAMES):
+${helperFunctions.map(h => {
+    const params = h.parameters && Array.isArray(h.parameters) ? h.parameters.join(', ') : 'N/A';
+    return `   - Helper function: "${h.name}(${params})" -> ${h.return_type || 'N/A'}
+     * DO NOT use variations
+     * DO NOT create helper functions not in this list`;
+}).join('\n')}
+
+5. FILE PATHS (MANDATORY - USE EXACT PATHS FROM CONTRACT):
+${contract.file_structure?.models?.map(m => `   - Model: ${m.file_path} (class: ${m.class_name})`).join('\n') || '   - No models defined'}
+${contract.file_structure?.controllers?.map(c => `   - Controller: ${c.file_path}`).join('\n') || '   - No controllers defined'}
+${contract.file_structure?.views?.map(v => `   - View: ${v.file_path}`).join('\n') || '   - No views defined'}
+${contract.file_structure?.templates?.map(t => `   - Template: ${t.file_path}`).join('\n') || '   - No templates defined'}
+
+CRITICAL - EXACT FILES TO GENERATE (MANDATORY):
+You MUST generate EXACTLY these files (no more, no less):
+${contract.file_structure?.models?.map(m => `#### ${m.file_path}`).join('\n') || ''}
+${contract.file_structure?.controllers?.map(c => `#### ${c.file_path}`).join('\n') || ''}
+${contract.file_structure?.views?.map(v => `#### ${v.file_path}`).join('\n') || ''}
+${contract.file_structure?.templates?.map(t => `#### ${t.file_path}`).join('\n') || ''}
+#### ${contract.file_structure?.app_file || 'app.py'}
+
+DO NOT generate any files NOT listed above.
+DO NOT create additional controllers, models, or files beyond what's listed.
+If the contract shows ONE controller, generate ONLY ONE controller file.
+If the contract shows multiple controllers, generate ONLY those exact controller files.
+
+CRITICAL - FILE PATH ENFORCEMENT:
+- You MUST use ONLY the file paths defined in the contract above
+- ALLOWED paths: models/, controllers/, views/, templates/, app.py, config/
+- FORBIDDEN paths: forms/, services/, utils/, helpers/, lib/, src/, components/, etc.
+- DO NOT create files in folders NOT listed in the contract
+- DO NOT use paths like "forms/product_form.py" - use "models/product.py" or "controllers/product_controller.py" instead
+- If the contract says "models/user.py", use EXACTLY "models/user.py" - NOT "models/users.py" or "model/user.py"
+- If the contract says "controllers/user_controller.py", use EXACTLY "controllers/user_controller.py" - NOT "controller/user_controller.py"
+- Templates MUST be in templates/ folder: "templates/register.html" - NOT "views/register.html" or "register.html"
+
+CRITICAL - STRICT ADHERENCE:
+- Use EXACT function names from contract.file_structure.controllers[].routes[].function_name
+- Use EXACT field names from contract.file_structure.models[].fields[].name
+- Use EXACT method names from contract.file_structure.models[].methods[].name
+- Use EXACT helper function names from contract.file_structure.controllers[].helper_functions[].name
+- DO NOT create variations, abbreviations, or alternative names
+- DO NOT split single functions into multiple (e.g., register_get/register_post when contract says register)
+- DO NOT add prefixes/suffixes (e.g., _handler, _route, _path, _hash)
+- Implement ALL routes, fields, methods, and helper functions defined in the contract
+- DO NOT create additional models, controllers, services, or imports that are NOT in the contract
+- DO NOT import models that are not listed in contract.file_structure.models
+- Use ONLY the exact import paths specified in contract.import_paths
+- Match function signatures (parameters, return types) EXACTLY from the contract
+- Use the database ORM and patterns specified in contract.database
+- Follow the framework patterns in contract.framework
+
+CRITICAL - SHARED MODELS (MANDATORY - PREVENTS TABLE COLLISIONS):
+- CERTAIN models are SHARED across functionalities and use shared file paths:
+  * User model: ALWAYS use "models/user.py" (NOT "models/{functionality}_user.py")
+  * Product model: ALWAYS use "models/product.py" (NOT "models/{functionality}_product.py")
+  * Category model: ALWAYS use "models/category.py" (NOT "models/{functionality}_category.py")
+- If the contract specifies a shared model path (e.g., "models/user.py"), you MUST:
+  1. ASSUME the shared model file already exists (it may have been created by a previous functionality)
+  2. DO NOT generate the shared model file - just import from it: "from models.user import User"
+  3. ONLY generate the shared model if this is the FIRST functionality that needs it (but still use shared path)
+  4. If generating a shared model, ALWAYS include: __table_args__ = {'extend_existing': True}
+- Shared models use the same table name across functionalities (e.g., 'users', 'products', 'categories')
+- DO NOT create functionality-specific User/Product/Category models - they will cause SQLAlchemy table collision errors
+- If you see a model path like "models/user.py" in the contract, it's a shared model:
+  * In controllers: Import it: "from models.user import User"
+  * In models: DO NOT generate "models/user.py" again - it's shared and may already exist
+  * If you MUST generate it (first time), use "models/user.py" with __table_args__ = {'extend_existing': True}
+- CRITICAL - CHECK CONTRACT FILE PATHS:
+  * If contract.file_structure.models[].file_path is "models/user.py" → Use shared import: from models.user import User
+  * If contract.file_structure.models[].file_path is "models/{functionality}_user.py" → This is WRONG, use shared path instead
+  * Always check the actual file_path in the contract and use shared paths for User/Product/Category
+
+CRITICAL - MODEL IMPORTS (STRICT):
+- ONLY import models that are explicitly defined in contract.file_structure.models
+- The contract defines these models: ${contract.file_structure?.models?.map(m => `${m.class_name} (${m.file_path})`).join(', ') || 'NONE'}
+- For shared models (User, Product, Category), check if the file exists:
+  * If "models/user.py" exists: Import it: "from models.user import User" - DO NOT generate it
+  * If "models/product.py" exists: Import it: "from models.product import Product" - DO NOT generate it
+  * If "models/category.py" exists: Import it: "from models.category import Category" - DO NOT generate it
+- DO NOT import or create models that are not in this list
+- DO NOT create EmailVerificationToken, EmailService, or any other models/services not in the contract
+- If verification tokens are needed, use the verification_token field in the User model (as defined in contract)
+- If you need a model for functionality, it MUST be defined in the contract first
+
+CRITICAL - NO ADDITIONAL DEPENDENCIES:
+- DO NOT create services/ folder
+- DO NOT create EmailService class
+- DO NOT create additional models beyond what's in contract.file_structure.models
+- Use Flask-Mail directly (mail.send()) if email functionality is needed
+- Use fields in existing models (like User.verification_token) instead of creating new models
+
+`;
+
+        // Build SRS context from packet (if available) or contract
+        let srsContext = '';
+        if (packet) {
+            // Use full SRS context from packet (embeddings)
+            srsContext = `
+FUNCTIONALITY: ${packet.name || contract.functionality || 'unknown'}
+DESCRIPTION: ${packet.description || 'N/A'}
 USE CASES: ${packet.useCases?.join(', ') || 'N/A'}
-CONTEXT: ${packet.context || 'N/A'}
 REQUIREMENTS: ${packet.requirements?.join(', ') || 'N/A'}
+ACTIVITY DIAGRAMS: ${packet.activityDiagrams?.join(', ') || 'N/A'}
 DEPENDENCIES: ${packet.dependencies?.join(', ') || 'N/A'}
+CONTEXT: ${packet.context || 'N/A'}
+`;
+        } else {
+            // Fallback to contract-only context
+            srsContext = `
+FUNCTIONALITY: ${contract.functionality || 'unknown'}
+`;
+        }
+
+        // MVC-Guided Prompt
+        const prompt = `You are a ${language.toUpperCase()} developer. Generate complete, production-ready MVC code following the API contract and SRS requirements below:
+
+${srsContext}
+
+${contractSection}
 
 REQUIREMENTS:
 - Generate actual ${language.toUpperCase()} code, NOT JSON
@@ -1704,15 +2726,37 @@ ONLY generate these core MVC files:
 CRITICAL REQUIREMENT - FLASK-SQLALCHEMY SETUP:
 For Flask applications with SQLAlchemy models, you MUST use Flask-SQLAlchemy (NOT raw SQLAlchemy):
 
-1. In app.py, ALWAYS include:
+1. In app.py, ALWAYS follow this EXACT order to avoid circular imports:
+   from flask import Flask
    from flask_sqlalchemy import SQLAlchemy
+   from flask_mail import Mail
    
    app = Flask(__name__)
    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app.db'
    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+   app.config['SECRET_KEY'] = 'your-secret-key'
+   # ... other config ...
    
-   # Initialize Flask-SQLAlchemy
+   # CRITICAL: Initialize db and mail BEFORE importing controllers
    db = SQLAlchemy(app)
+   mail = Mail(app)
+   
+   # CRITICAL: Import blueprints AFTER db and mail are initialized (prevents circular imports)
+   from controllers.user_controller import user_bp
+   # ... other blueprint imports ...
+   
+   # Register blueprints
+   app.register_blueprint(user_bp)
+   # ... other blueprint registrations ...
+   
+   IMPORTANT: The order MUST be:
+   1. Import Flask, SQLAlchemy, Mail
+   2. Create app
+   3. Configure app
+   4. Initialize db = SQLAlchemy(app)
+   5. Initialize mail = Mail(app)
+   6. THEN import blueprints (controllers can now safely import db from app)
+   7. Register blueprints
 
 2. In models/*.py files, ALWAYS use:
    from app import db
@@ -1722,7 +2766,28 @@ For Flask applications with SQLAlchemy models, you MUST use Flask-SQLAlchemy (NO
        # columns here
 
 3. In controllers/*.py files, ALWAYS use:
+   from flask import Blueprint
    from app import db
+   
+   # CRITICAL - BLUEPRINT INITIALIZATION (MANDATORY):
+   - Blueprint constructor: Blueprint(name, import_name, ...)
+   - The second argument (import_name) is ALWAYS __name__
+   - CORRECT: user_bp = Blueprint('user', __name__)
+   - WRONG: Blueprint('user', __name__, import_name=__name__)  # This causes TypeError: got multiple values for argument 'import_name'
+   - DO NOT pass import_name as a keyword argument when __name__ is already passed as the second positional argument
+   - Example: user_registration_bp = Blueprint('user_registration', __name__)  # CORRECT
+   
+   # CRITICAL: ONLY import models that are defined in the contract
+   # The contract defines these models: ${contract.file_structure?.models?.map(m => m.class_name).join(', ') || 'NONE'}
+   # Example: from models.user import User (ONLY if User is in contract.file_structure.models)
+   # DO NOT import models that are not in the contract
+   # DO NOT import EmailVerificationToken, EmailService, or any other models/services not in the contract
+   # If verification tokens are needed, use User.verification_token field (as defined in contract)
+   
+   # CRITICAL: Use EXACT function names from contract - DO NOT split into _get/_post variants
+   # If contract says "register", use single function "register" that handles both GET and POST
+   # If contract says "verify_email", use "verify_email" (NOT verify_email_get)
+   # If contract says "login", use "login" (NOT login_get/login_post)
    
    # Then use: db.session.add(), db.session.commit(), db.session.query()
 
@@ -1735,12 +2800,82 @@ This ensures compatibility with Flask test clients and pytest fixtures that expe
 FRAMEWORK-SPECIFIC MVC STRUCTURE:
 
 PYTHON/FLASK:
-- models/ folder with separate model files (user.py, product.py)
+- models/ folder with separate model files (ONLY the models defined in contract.file_structure.models)
 - views/ folder with view classes (user_views.py, product_views.py)
-- controllers/ folder with controller classes (user_controller.py, product_controller.py)
-- templates/ folder with HTML templates
-- config/ folder with database.py and config.py
+- controllers/ folder with controller classes (ONLY the controllers defined in contract.file_structure.controllers)
+- templates/ folder with HTML templates (ONLY the templates defined in contract.file_structure.templates)
 - app.py in root directory (main application file)
+
+CRITICAL - ONLY GENERATE WHAT'S IN THE CONTRACT (STRICT ENFORCEMENT):
+- Generate ONLY the models listed in contract.file_structure.models
+- Generate ONLY the controllers listed in contract.file_structure.controllers
+- Generate ONLY the routes listed in contract.file_structure.controllers[].routes
+- Generate ONLY the templates listed in contract.file_structure.templates
+- Generate ONLY the helper functions listed in contract.file_structure.controllers[].helper_functions
+- DO NOT create additional models, controllers, services, or files that are not in the contract
+- DO NOT import models that are not in contract.file_structure.models
+- DO NOT create services/ folder or EmailService classes
+- DO NOT create EmailVerificationToken or any other models not in the contract
+- If email verification is needed, use User.verification_token field (as defined in contract), NOT a separate model
+- Use Flask-Mail directly (from app import mail; mail.send()) instead of creating EmailService
+
+CRITICAL - EXACT FILE GENERATION (MANDATORY - APPLIES TO ALL FILE TYPES):
+- Generate EXACTLY the files listed in contract.file_structure (models, controllers, views, templates)
+- DO NOT create additional files beyond what's in the contract
+- DO NOT split one file into multiple files
+- DO NOT create variations, abbreviations, or alternative file names
+- File names MUST match contract.file_structure EXACTLY (case-sensitive, character-by-character)
+
+CRITICAL - FUNCTIONALITY-BASED NAMING (MANDATORY):
+- ALL file names MUST be prefixed with the functionality name (in snake_case)
+- The contract already includes functionality-prefixed names - use them EXACTLY as specified
+- Models: Use format from contract (e.g., "models/product_search_product.py", NOT "models/product.py")
+- Controllers: Use format from contract (e.g., "controllers/product_search_controller.py", NOT "controllers/product_controller.py")
+- Views: Use format from contract (e.g., "views/product_search_views.py", NOT "views/product_views.py")
+- Templates: Use format from contract (e.g., "templates/product_search_search.html", NOT "templates/search.html")
+- DO NOT use generic names without functionality prefix
+- DO NOT create files like "category.py", "product.py" - use "product_search_category.py", "product_search_product.py" instead
+
+STRICT FILE COUNT AND NAMING (ALL FILE TYPES):
+- Models: Generate ONLY the models in contract.file_structure.models
+  * If contract lists 2 models, generate EXACTLY 2 models (not 1, not 3)
+  * If contract says "models/product.py", generate EXACTLY "models/product.py" - NOT "models/products.py"
+  * If contract says "models/category.py" AND "models/product.py", generate BOTH - but if contract only lists one, generate ONLY that one
+  
+- Controllers: Generate ONLY the controllers in contract.file_structure.controllers
+  * If contract lists 1 controller, generate EXACTLY 1 controller (not 2, not 0)
+  * If contract says "controllers/product_search_controller.py", generate EXACTLY that - NOT "controllers/product_controller.py"
+  * DO NOT split one controller into multiple files (e.g., product_search_controller.py AND category_controller.py)
+  
+- Views: Generate ONLY the views in contract.file_structure.views
+  * If contract lists 1 view, generate EXACTLY 1 view (not 2, not 0)
+  * File names must match contract EXACTLY
+  
+- Templates: Generate ONLY the templates in contract.file_structure.templates
+  * If contract lists 2 templates, generate EXACTLY 2 templates (not 1, not 3)
+  * File names must match contract EXACTLY
+
+GENERAL RULE:
+- Count of files MUST match contract (if contract has 2 models, generate 2 models - not 1, not 3)
+- File paths MUST match contract EXACTLY (character-by-character, case-sensitive)
+- DO NOT add, remove, or modify file names from what's in the contract
+
+CRITICAL - EXACT NAMING ENFORCEMENT (MANDATORY):
+- Use EXACT function names from contract.file_structure.controllers[].routes[].function_name
+  * If contract says "register", use "register" (NOT register_get/register_post)
+  * If contract says "verify_email", use "verify_email" (NOT verify_email_get)
+  * If contract says "login", use "login" (NOT login_get/login_post)
+- Use EXACT field names from contract.file_structure.models[].fields[].name
+  * If contract says "is_verified", use "is_verified" (NOT is_email_verified)
+  * If contract says "verification_token", use "verification_token" (NOT email_verification_token_hash)
+  * If contract says "profile_picture", use "profile_picture" (NOT profile_picture_path)
+- Use EXACT method names from contract.file_structure.models[].methods[].name
+  * If contract says "generate_verification_token", use "generate_verification_token" (NOT set_email_verification_token)
+- Use EXACT helper function names from contract.file_structure.controllers[].helper_functions[].name
+  * If contract says "validate_registration_data", use "validate_registration_data" (NOT validate_registration_payload)
+- DO NOT create variations, abbreviations, or alternative names
+- DO NOT split single functions into multiple (e.g., register_get/register_post when contract says register)
+- DO NOT add prefixes/suffixes (e.g., _handler, _route, _path, _hash, _get, _post)
 
 JAVASCRIPT/NODE:
 - models/ folder with model files
@@ -1815,6 +2950,26 @@ Use this format for each file:
 
 #### filename2.ext
 [code here]
+
+CRITICAL - FILE PATH ENFORCEMENT (MANDATORY):
+- You MUST use ONLY file paths from the contract.file_structure
+- ALLOWED paths: models/, controllers/, views/, templates/, app.py, config/
+- FORBIDDEN paths: forms/, services/, utils/, helpers/, lib/, src/, components/, api/, routes/, middleware/, etc.
+- DO NOT create files in folders NOT listed in the contract
+- DO NOT use paths like "forms/product_form.py" - use "models/product.py" or "controllers/product_controller.py" instead
+- If contract says "models/user.py", use EXACTLY "models/user.py" - NOT "models/users.py" or "model/user.py"
+- If contract says "controllers/user_controller.py", use EXACTLY "controllers/user_controller.py"
+- Templates MUST be in templates/ folder: "templates/register.html" - NOT "views/register.html" or "register.html"
+- Example CORRECT paths:
+  * #### models/user.py
+  * #### controllers/user_controller.py
+  * #### views/user_views.py
+  * #### templates/register.html
+  * #### app.py
+- Example WRONG paths (DO NOT USE):
+  * #### forms/user_form.py (WRONG - use models/user.py)
+  * #### services/user_service.py (WRONG - use controllers/user_controller.py)
+  * #### utils/helpers.py (WRONG - not in contract)
 
 Generate the complete ${language.toUpperCase()} code for this functionality. Return ONLY code files with #### filename format. Do not include any explanations, descriptions, or additional text after the code.`;
         
@@ -1946,12 +3101,177 @@ Generate the complete ${language.toUpperCase()} code for this functionality. Ret
             const fileUri = vscode.Uri.file(filePath);
             vscode.window.showTextDocument(fileUri);
             
+            // Return saved files list for backup purposes
+            return savedFiles;
+            
         } catch (error) {
             console.error('❌ [EXPORT] Export failed:', error.message);
             this.panel?.webview.postMessage({
                 type: 'showError',
                 message: 'Export failed: ' + error.message
             });
+            return []; // Return empty array on error
+        }
+    }
+
+    // Read actual code files from disk and reconstruct code string format
+    readCodeFromFiles(projectPath, savedFiles) {
+        const fs = require('fs');
+        const path = require('path');
+        
+        try {
+            const codeParts = [];
+            
+            // Read all saved files and reconstruct the code string format
+            for (const filePath of savedFiles) {
+                const fullPath = path.join(projectPath, filePath);
+                
+                if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
+                    const content = fs.readFileSync(fullPath, 'utf8');
+                    codeParts.push(`#### ${filePath}\n${content}`);
+                    console.log(`📖 [READ] Read file: ${filePath} (${content.length} chars)`);
+                }
+            }
+            
+            // Also read MVC directories if they exist
+            const mvcDirs = [
+                { dir: 'models', pattern: /\.py$/ },
+                { dir: 'controllers', pattern: /\.py$/ },
+                { dir: 'views', pattern: /\.py$/ },
+                { dir: 'templates', pattern: /\.html$/ }
+            ];
+            
+            for (const { dir, pattern } of mvcDirs) {
+                const dirPath = path.join(projectPath, dir);
+                if (fs.existsSync(dirPath) && fs.statSync(dirPath).isDirectory()) {
+                    const files = fs.readdirSync(dirPath);
+                    for (const file of files) {
+                        if (pattern.test(file) && !file.startsWith('__')) {
+                            const filePath = path.join(dir, file);
+                            const fullPath = path.join(projectPath, filePath);
+                            
+                            // Only read if not already in savedFiles
+                            if (!savedFiles.includes(filePath) && fs.existsSync(fullPath)) {
+                                const content = fs.readFileSync(fullPath, 'utf8');
+                                codeParts.push(`#### ${filePath}\n${content}`);
+                                console.log(`📖 [READ] Read additional file: ${filePath} (${content.length} chars)`);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Always read app.py if it exists
+            const appPyPath = path.join(projectPath, 'app.py');
+            if (fs.existsSync(appPyPath) && !savedFiles.includes('app.py')) {
+                const content = fs.readFileSync(appPyPath, 'utf8');
+                codeParts.push(`#### app.py\n${content}`);
+                console.log(`📖 [READ] Read app.py (${content.length} chars)`);
+            }
+            
+            const reconstructedCode = codeParts.join('\n\n');
+            console.log(`✅ [READ] Reconstructed code from ${codeParts.length} files (${reconstructedCode.length} total chars)`);
+            
+            return reconstructedCode;
+        } catch (error) {
+            console.error('❌ [READ] Failed to read code from files:', error);
+            return null;
+        }
+    }
+
+    // Backup original code files before feedback loop modifies them
+    backupOriginalCode(projectPath, savedFiles) {
+        const fs = require('fs');
+        const path = require('path');
+        
+        try {
+            const backupDir = path.join(projectPath, 'original_code_backup');
+            
+            // Create backup directory
+            if (!fs.existsSync(backupDir)) {
+                fs.mkdirSync(backupDir, { recursive: true });
+                console.log(`📦 [BACKUP] Created backup directory: ${backupDir}`);
+            }
+            
+            // Copy all saved files to backup directory
+            const backedUpFiles = [];
+            for (const filePath of savedFiles) {
+                const sourcePath = path.join(projectPath, filePath);
+                const backupPath = path.join(backupDir, filePath);
+                
+                // Create subdirectories if needed
+                const backupDirPath = path.dirname(backupPath);
+                if (!fs.existsSync(backupDirPath)) {
+                    fs.mkdirSync(backupDirPath, { recursive: true });
+                }
+                
+                // Copy file if it exists
+                if (fs.existsSync(sourcePath)) {
+                    fs.copyFileSync(sourcePath, backupPath);
+                    backedUpFiles.push(filePath);
+                    console.log(`📦 [BACKUP] Backed up: ${filePath}`);
+                }
+            }
+            
+            // Also backup any MVC structure files (models, controllers, views directories)
+            const mvcDirs = ['models', 'controllers', 'views', 'config'];
+            for (const dir of mvcDirs) {
+                const sourceDir = path.join(projectPath, dir);
+                const backupDirPath = path.join(backupDir, dir);
+                
+                if (fs.existsSync(sourceDir) && fs.statSync(sourceDir).isDirectory()) {
+                    this.copyDirectoryRecursive(sourceDir, backupDirPath);
+                    console.log(`📦 [BACKUP] Backed up directory: ${dir}/`);
+                }
+            }
+            
+            // Create a README in the backup directory explaining what it is
+            const readmePath = path.join(backupDir, 'README.txt');
+            const readmeContent = `Original Code Backup
+====================
+
+This directory contains a backup of the original generated code BEFORE the automated feedback loop ran.
+
+The feedback loop modifies the code files in the main project directory to fix test failures.
+This backup preserves the original version for reference.
+
+Backed up files:
+${backedUpFiles.map(f => `- ${f}`).join('\n')}
+
+Backup created: ${new Date().toLocaleString()}
+`;
+            fs.writeFileSync(readmePath, readmeContent, 'utf8');
+            
+            console.log(`✅ [BACKUP] Original code backed up successfully to: ${backupDir}`);
+            console.log(`📦 [BACKUP] Total files backed up: ${backedUpFiles.length}`);
+            
+            return backupDir;
+        } catch (error) {
+            console.error('❌ [BACKUP] Failed to backup original code:', error);
+            // Don't throw - backup failure shouldn't stop the feedback loop
+            return null;
+        }
+    }
+    
+    // Helper function to recursively copy directories
+    copyDirectoryRecursive(sourceDir, targetDir) {
+        const fs = require('fs');
+        const path = require('path');
+        
+        if (!fs.existsSync(targetDir)) {
+            fs.mkdirSync(targetDir, { recursive: true });
+        }
+        
+        const files = fs.readdirSync(sourceDir);
+        for (const file of files) {
+            const sourcePath = path.join(sourceDir, file);
+            const targetPath = path.join(targetDir, file);
+            
+            if (fs.statSync(sourcePath).isDirectory()) {
+                this.copyDirectoryRecursive(sourcePath, targetPath);
+            } else {
+                fs.copyFileSync(sourcePath, targetPath);
+            }
         }
     }
 
@@ -2186,47 +3506,81 @@ def init_db(database_uri='sqlite:///app.db'):
     parsePythonDjango(code, projectPath) {
         const savedFiles = [];
         
-        // More comprehensive patterns to match Flask MVC structure
+        // Improved patterns to match Flask MVC structure with better regex
+        // Patterns are ordered from most specific to least specific
         const patterns = [
-            // Models patterns
-            { regex: /#### models\/([^\.\n]+)\.py\s*\n([\s\S]*?)(?=####|\n####|$)/, file: 'models/{filename}.py', isDynamic: true },
-            { regex: /#### models\.py\s*\n([\s\S]*?)(?=####|\n####|$)/, file: 'models.py' },
+            // Models patterns - improved to handle nested paths and better content extraction
+            { regex: /####\s+models\/([^\s\n]+\.py)\s*\n([\s\S]*?)(?=\n####\s+|$)/, file: 'models/{filename}', isDynamic: true, captureGroup: 1 },
             
             // Views patterns
-            { regex: /#### views\/([^\.\n]+)\.py\s*\n([\s\S]*?)(?=####|\n####|$)/, file: 'views/{filename}.py', isDynamic: true },
-            { regex: /#### views\.py\s*\n([\s\S]*?)(?=####|\n####|$)/, file: 'views.py' },
+            { regex: /####\s+views\/([^\s\n]+\.py)\s*\n([\s\S]*?)(?=\n####\s+|$)/, file: 'views/{filename}', isDynamic: true, captureGroup: 1 },
             
             // Controllers patterns
-            { regex: /#### controllers\/([^\.\n]+)\.py\s*\n([\s\S]*?)(?=####|\n####|$)/, file: 'controllers/{filename}.py', isDynamic: true },
-            { regex: /#### controllers\.py\s*\n([\s\S]*?)(?=####|\n####|$)/, file: 'controllers.py' },
+            { regex: /####\s+controllers\/([^\s\n]+\.py)\s*\n([\s\S]*?)(?=\n####\s+|$)/, file: 'controllers/{filename}', isDynamic: true, captureGroup: 1 },
             
-            // Templates patterns
-            { regex: /#### templates\/([^\.\n]+)\.html\s*\n([\s\S]*?)(?=####|\n####|$)/, file: 'templates/{filename}.html', isDynamic: true },
-            { regex: /#### templates\/.*?\.html\s*\n([\s\S]*?)(?=####|\n####|$)/, file: 'templates/template.html' },
+            // Templates patterns - improved to handle nested paths
+            { regex: /####\s+templates\/([^\s\n]+\.html)\s*\n([\s\S]*?)(?=\n####\s+|$)/, file: 'templates/{filename}', isDynamic: true, captureGroup: 1 },
             
-            // App patterns - save in root for Flask apps (this is correct)
-            { regex: /#### app\.py\s*\n([\s\S]*?)(?=####|\n####|$)/, file: 'app.py' },
-            { regex: /#### main\.py\s*\n([\s\S]*?)(?=####|\n####|$)/, file: 'main.py' },
+            // App patterns - save in root for Flask apps
+            { regex: /####\s+app\.py\s*\n([\s\S]*?)(?=\n####\s+|$)/, file: 'app.py', captureGroup: 1 },
+            { regex: /####\s+main\.py\s*\n([\s\S]*?)(?=\n####\s+|$)/, file: 'main.py', captureGroup: 1 },
             
             // Database patterns - save in config folder
-            { regex: /#### database\.py\s*\n([\s\S]*?)(?=####|\n####|$)/, file: 'config/database.py' },
-            { regex: /#### config\.py\s*\n([\s\S]*?)(?=####|\n####|$)/, file: 'config/config.py' },
-            
-            // Generic Python files (but exclude unwanted files)
-            { regex: /#### (?!requirements|migrations|README)([^\.\n]+)\.py\s*\n([\s\S]*?)(?=####|\n####|$)/, file: '{filename}.py', isDynamic: true }
+            { regex: /####\s+config\/database\.py\s*\n([\s\S]*?)(?=\n####\s+|$)/, file: 'config/database.py', captureGroup: 1 },
+            { regex: /####\s+config\/config\.py\s*\n([\s\S]*?)(?=\n####\s+|$)/, file: 'config/config.py', captureGroup: 1 },
+            { regex: /####\s+database\.py\s*\n([\s\S]*?)(?=\n####\s+|$)/, file: 'config/database.py', captureGroup: 1 },
+            { regex: /####\s+config\.py\s*\n([\s\S]*?)(?=\n####\s+|$)/, file: 'config/config.py', captureGroup: 1 }
+        ];
+        
+        // List of allowed MVC paths (from contract structure)
+        const allowedPaths = [
+            'models/', 'controllers/', 'views/', 'templates/', 'config/',
+            'app.py', 'main.py', 'database.py', 'config.py'
+        ];
+        
+        // List of forbidden paths (non-MVC folders)
+        const forbiddenPaths = [
+            'forms/', 'services/', 'utils/', 'helpers/', 'lib/', 'src/', 
+            'components/', 'api/', 'routes/', 'middleware/', 'common/',
+            'shared/', 'core/', 'base/', 'abstract/'
         ];
         
         patterns.forEach(pattern => {
-            const match = code.match(pattern.regex);
-            if (match) {
+            // Use global flag to find all matches, not just the first one
+            const regex = new RegExp(pattern.regex.source, 'g');
+            let match;
+            
+            while ((match = regex.exec(code)) !== null) {
                 let fileName = pattern.file;
-                let fileContent = match[1];
+                let fileContent;
                 
                 // Handle dynamic filenames
                 if (pattern.isDynamic) {
                     const dynamicName = match[1];
                     fileName = fileName.replace('{filename}', dynamicName);
-                    fileContent = match[2];
+                    // Content is in match[2] for dynamic patterns
+                    fileContent = match[2] || match[1];
+                } else {
+                    // For non-dynamic patterns, content is in the capture group
+                    const contentGroup = pattern.captureGroup || 1;
+                    fileContent = match[contentGroup];
+                }
+                
+                // Validate file path - reject non-MVC paths
+                const isForbidden = forbiddenPaths.some(forbidden => fileName.includes(forbidden));
+                if (isForbidden) {
+                    console.warn(`⚠️ [MVC] Rejected non-MVC path: ${fileName} (not in contract structure)`);
+                    continue; // Skip this file
+                }
+                
+                // Check if path matches allowed MVC structure
+                const isAllowed = allowedPaths.some(allowed => 
+                    fileName.startsWith(allowed) || fileName === allowed.replace('/', '')
+                ) || fileName.match(/^(models|controllers|views|templates|config)\//);
+                
+                if (!isAllowed && !fileName.match(/^(app|main|database|config)\.py$/)) {
+                    console.warn(`⚠️ [MVC] Rejected invalid path: ${fileName} (must use MVC structure: models/, controllers/, views/, templates/)`);
+                    continue; // Skip this file
                 }
                 
                 const filePath = path.join(projectPath, fileName);
@@ -2236,13 +3590,262 @@ def init_db(database_uri='sqlite:///app.db'):
                     fs.mkdirSync(dir, { recursive: true });
                 }
                 
-                fs.writeFileSync(filePath, fileContent.trim(), 'utf8');
+                // Trim file content and validate it's not empty
+                const trimmedContent = fileContent ? fileContent.trim() : '';
+                if (!trimmedContent) {
+                    console.warn(`⚠️ [MVC] Skipping empty file: ${fileName}`);
+                    continue;
+                }
+                
+                // Special handling for app.py - merge instead of overwrite
+                if (fileName === 'app.py' && fs.existsSync(filePath)) {
+                    console.log('🔄 [MVC] app.py exists - merging new content...');
+                    const mergedContent = this.mergeAppPy(filePath, trimmedContent);
+                    fs.writeFileSync(filePath, mergedContent, 'utf8');
+                    console.log('✅ [MVC] Merged app.py successfully');
+                } else {
+                    fs.writeFileSync(filePath, trimmedContent, 'utf8');
+                }
+                
                 savedFiles.push(fileName);
                 console.log(`💾 [MVC] Saved: ${fileName}`);
             }
         });
         
         return savedFiles;
+    }
+
+    /**
+     * Merge new app.py content with existing app.py
+     * Preserves existing blueprints, config, and initialization
+     * Adds new blueprints from the new code
+     */
+    mergeAppPy(existingAppPath, newAppContent) {
+        const fs = require('fs');
+        
+        // Read existing app.py
+        let existingContent = '';
+        if (fs.existsSync(existingAppPath)) {
+            existingContent = fs.readFileSync(existingAppPath, 'utf8');
+        }
+        
+        // If no existing content, return new content
+        if (!existingContent.trim()) {
+            console.log('📝 [MERGE] No existing app.py, using new content');
+            return newAppContent;
+        }
+        
+        console.log('🔄 [MERGE] Merging app.py...');
+        
+        // Extract sections from existing app.py
+        const existingImports = this.extractImports(existingContent);
+        const existingConfig = this.extractConfig(existingContent);
+        const existingInit = this.extractInitialization(existingContent);
+        const existingBlueprintImports = this.extractBlueprintImports(existingContent);
+        const existingBlueprintRegistrations = this.extractBlueprintRegistrations(existingContent);
+        const existingMainBlock = this.extractMainBlock(existingContent);
+        
+        // Extract sections from new app.py
+        const newImports = this.extractImports(newAppContent);
+        const newConfig = this.extractConfig(newAppContent);
+        const newInit = this.extractInitialization(newAppContent);
+        const newBlueprintImports = this.extractBlueprintImports(newAppContent);
+        const newBlueprintRegistrations = this.extractBlueprintRegistrations(newAppContent);
+        const newMainBlock = this.extractMainBlock(newAppContent);
+        
+        // Merge imports (combine unique imports)
+        const mergedImports = this.mergeImports(existingImports, newImports);
+        
+        // Merge config (preserve existing, add new if not present)
+        const mergedConfig = this.mergeConfig(existingConfig, newConfig);
+        
+        // Merge initialization (preserve existing db/mail init, use it if exists)
+        const mergedInit = existingInit || newInit;
+        
+        // Merge blueprint imports (add new ones that don't exist)
+        const mergedBlueprintImports = this.mergeBlueprintImports(existingBlueprintImports, newBlueprintImports);
+        
+        // Extract blueprint names from merged imports to validate registrations
+        const validBlueprintNames = new Set();
+        mergedBlueprintImports.split('\n').forEach(importLine => {
+            const match = importLine.match(/import\s+(\w+)/);
+            if (match) {
+                validBlueprintNames.add(match[1]);
+            }
+        });
+        
+        // Merge blueprint registrations (add new ones that don't exist AND have valid imports)
+        const mergedBlueprintRegistrations = this.mergeBlueprintRegistrations(
+            existingBlueprintRegistrations, 
+            newBlueprintRegistrations,
+            validBlueprintNames
+        );
+        
+        // Use existing main block or new one
+        const finalMainBlock = existingMainBlock || newMainBlock;
+        
+        // Build merged app.py with proper structure
+        const mergedContent = `${mergedImports}
+
+app = Flask(__name__)
+${mergedConfig}
+
+${mergedInit}
+
+${mergedBlueprintImports}
+
+${mergedBlueprintRegistrations}
+
+${finalMainBlock}`;
+        
+        console.log(`✅ [MERGE] Merged app.py: ${existingBlueprintImports.length} existing + ${newBlueprintImports.length} new blueprints`);
+        console.log(`📊 [MERGE] Total blueprints: ${mergedBlueprintImports.split('\n').filter(l => l.trim()).length}`);
+        
+        return mergedContent.trim();
+    }
+    
+    extractImports(content) {
+        const importLines = [];
+        const lines = content.split('\n');
+        for (const line of lines) {
+            if (line.trim().startsWith('from ') || line.trim().startsWith('import ')) {
+                if (!line.includes('controllers.') && !line.includes('views.')) {
+                    importLines.push(line);
+                }
+            }
+        }
+        return importLines.join('\n');
+    }
+    
+    extractConfig(content) {
+        const configLines = [];
+        const lines = content.split('\n');
+        let inConfig = false;
+        for (const line of lines) {
+            if (line.includes("app.config['") || line.includes('app.config["')) {
+                inConfig = true;
+                configLines.push(line);
+            } else if (inConfig && line.trim() && !line.includes('=') && !line.includes('db =') && !line.includes('mail =')) {
+                inConfig = false;
+            }
+        }
+        return configLines.join('\n');
+    }
+    
+    extractInitialization(content) {
+        const initLines = [];
+        const lines = content.split('\n');
+        for (const line of lines) {
+            if (line.includes('db = SQLAlchemy') || line.includes('mail = Mail')) {
+                initLines.push(line);
+            }
+        }
+        return initLines.join('\n');
+    }
+    
+    extractBlueprintImports(content) {
+        const imports = [];
+        const lines = content.split('\n');
+        for (const line of lines) {
+            if (line.includes('from controllers.') || line.includes('from views.')) {
+                imports.push(line.trim());
+            }
+        }
+        return imports;
+    }
+    
+    extractBlueprintRegistrations(content) {
+        const registrations = [];
+        const lines = content.split('\n');
+        for (const line of lines) {
+            if (line.includes('app.register_blueprint(')) {
+                registrations.push(line.trim());
+            }
+        }
+        return registrations;
+    }
+    
+    extractMainBlock(content) {
+        const mainMatch = content.match(/if __name__\s*==\s*['"]__main__['"]:[\s\S]*/);
+        return mainMatch ? mainMatch[0] : '';
+    }
+    
+    mergeImports(existing, newImports) {
+        const existingLines = existing.split('\n').filter(l => l.trim());
+        const newLines = newImports.split('\n').filter(l => l.trim());
+        const allImports = [...existingLines];
+        
+        for (const newLine of newLines) {
+            if (!existingLines.some(existing => existing.trim() === newLine.trim())) {
+                allImports.push(newLine);
+            }
+        }
+        
+        return allImports.join('\n');
+    }
+    
+    mergeConfig(existing, newConfig) {
+        const existingLines = existing.split('\n').filter(l => l.trim());
+        const newLines = newConfig.split('\n').filter(l => l.trim());
+        const allConfig = [...existingLines];
+        
+        for (const newLine of newLines) {
+            const key = newLine.match(/app\.config\[['"]([^'"]+)['"]\]/)?.[1];
+            if (key && !existingLines.some(existing => existing.includes(`['${key}']`) || existing.includes(`["${key}"]`))) {
+                allConfig.push(newLine);
+            }
+        }
+        
+        return allConfig.join('\n');
+    }
+    
+    mergeBlueprintImports(existing, newImports) {
+        const merged = [...existing];
+        for (const newImport of newImports) {
+            const blueprintName = newImport.match(/(\w+_bp|\w+_views)/)?.[1];
+            if (blueprintName && !existing.some(existing => existing.includes(blueprintName))) {
+                merged.push(newImport);
+            }
+        }
+        return merged.join('\n');
+    }
+    
+    mergeBlueprintRegistrations(existing, newRegistrations, validBlueprintNames = null) {
+        const merged = [];
+        
+        // First, validate and add existing registrations (only if they have valid imports)
+        for (const existingReg of existing) {
+            const blueprintName = existingReg.match(/register_blueprint\((\w+)\)/)?.[1];
+            if (blueprintName) {
+                // If validBlueprintNames is provided, validate against it
+                if (validBlueprintNames && !validBlueprintNames.has(blueprintName)) {
+                    console.warn(`⚠️ [MERGE] Removing invalid blueprint registration: ${blueprintName} (no import found)`);
+                    continue; // Skip invalid registration
+                }
+                merged.push(existingReg);
+            }
+        }
+        
+        // Then, add new registrations (only if they have valid imports and don't exist)
+        for (const newReg of newRegistrations) {
+            const blueprintName = newReg.match(/register_blueprint\((\w+)\)/)?.[1];
+            if (blueprintName) {
+                // Check if already registered
+                if (merged.some(reg => reg.includes(blueprintName))) {
+                    continue; // Already registered
+                }
+                
+                // Validate that import exists
+                if (validBlueprintNames && !validBlueprintNames.has(blueprintName)) {
+                    console.warn(`⚠️ [MERGE] Skipping blueprint registration: ${blueprintName} (no import found)`);
+                    continue; // Skip if no import
+                }
+                
+                merged.push(newReg);
+            }
+        }
+        
+        return merged.join('\n');
     }
 
     // Parse JavaScript/Node.js code
@@ -2392,32 +3995,148 @@ def init_db(database_uri='sqlite:///app.db'):
         return savedFiles;
     }
 
-    async handleGenerateTests(functionality, code, language) {
-        console.log('🧪 [EXTENSION] handleGenerateTests called');
+    async handleGenerateTests(functionality, language) {
+        console.log('🧪 [EXTENSION] handleGenerateTests called (TDD Mode)');
         console.log('🧪 [EXTENSION] Functionality:', functionality);
-        console.log('🧪 [EXTENSION] Code length:', code?.length);
         console.log('🧪 [EXTENSION] Language:', language);
+        console.log('🔴 [TDD] Test-Driven Development Mode: Generating contract first, then tests');
+        
+        // Start timing at the VERY BEGINNING (when button is clicked)
+        const startTime = new Date();
+        const startTimeISO = startTime.toISOString();
+        const startTimeFormatted = startTime.toLocaleString();
+        console.log(`⏱️ [TEST-GEN] Test generation started at: ${startTimeFormatted}`);
         
         try {
-            console.log('🧪 [EXTENSION] Starting test generation...');
+            // Extract the name from the functionality object
+            const functionalityName = functionality.name || functionality;
+            console.log('🔍 [EXTENSION] Using functionality name:', functionalityName);
             
-            // Generate test cases using LLM
-            const testCode = await this.generateTestCases(functionality, code, language);
+            // Initialize timing store for this functionality if not exists
+            if (!this.generationTimingStore[functionalityName]) {
+                this.generationTimingStore[functionalityName] = {};
+            }
+            this.generationTimingStore[functionalityName].testGen = {
+                startTime: startTimeISO,
+                startTimeFormatted: startTimeFormatted
+            };
+            
+            // Find the embedded packet for this functionality
+            const packet = this.getEmbeddedPacketByName(functionalityName);
+            
+            if (!packet) {
+                throw new Error(`Functionality "${functionalityName}" not found in embedded packets`);
+            }
+            
+            console.log('📦 [EXTENSION] Found embedded packet:', packet.name);
+            
+            // Step 1: Generate contract first (if not already generated)
+            let contract = this.generatedContracts[functionalityName];
+            if (!contract) {
+                console.log('📋 [CONTRACT] Generating contract for:', functionalityName);
+                contract = await this.generateContract(packet, language);
+                this.generatedContracts[functionalityName] = contract;
+                console.log('✅ [CONTRACT] Contract generated and stored');
+            } else {
+                console.log('📋 [CONTRACT] Using existing contract for:', functionalityName);
+            }
+            
+            // Step 2: Generate test cases using contract and packet (TDD: independent generation)
+            // Pass both contract (for structure) and packet (for SRS context/requirements)
+            const testCode = await this.generateTestCases(contract, packet, language);
             console.log('🧪 [EXTENSION] Test code generated, length:', testCode?.length);
             
             // Export test file
             const testFilePath = await this.exportTestFile(functionality, testCode, language);
             console.log('🧪 [EXTENSION] Test file exported to:', testFilePath);
             
-            // Send success message
+            // Count test cases in the generated test code
+            let testCount = 0;
+            if (testCode) {
+                // Count Python pytest test functions
+                const pytestMatches = testCode.match(/def\s+test_/g);
+                if (pytestMatches) {
+                    testCount = pytestMatches.length;
+                } else {
+                    // Count JavaScript Jest test functions
+                    const jestMatches = testCode.match(/(it\(|test\(|describe\()/g);
+                    if (jestMatches) {
+                        testCount = jestMatches.length;
+                    } else {
+                        // Count Java JUnit test methods
+                        const junitMatches = testCode.match(/@Test|public\s+void\s+test/g);
+                        if (junitMatches) {
+                            testCount = junitMatches.length;
+                        }
+                    }
+                }
+            }
+            
+            // Store generated tests for later use in code generation (TDD)
+            if (!this.generatedTests) {
+                this.generatedTests = {};
+            }
+            this.generatedTests[functionality?.name || 'default'] = {
+                functionality: functionality,
+                testCode: testCode,
+                language: language,
+                testCount: testCount
+            };
+            
+            // Send success message with test count (this is when user sees the results)
+            const testCountMessage = testCount > 0 
+                ? `${testCount} test case${testCount === 1 ? '' : 's'} generated and saved successfully!`
+                : 'Test cases generated and saved successfully!';
+            
+            const tddMessage = ' (TDD Mode: Now generate code to pass these tests)';
+            
             this.panel?.webview.postMessage({
                 type: 'testGenerated',
-                message: 'Test cases generated and saved successfully!'
+                message: testCountMessage + tddMessage,
+                testCount: testCount,
+                isTDDMode: true
             });
             
+            // End timing RIGHT AFTER user sees the results (includes everything: contract gen, test gen, file export, UI update)
+            const endTime = new Date();
+            const endTimeISO = endTime.toISOString();
+            const endTimeFormatted = endTime.toLocaleString();
+            const duration = endTime - startTime; // Duration in milliseconds
+            const durationSeconds = (duration / 1000).toFixed(2);
+            const durationFormatted = this.formatDuration(duration);
+            
+            // Store timing data
+            this.generationTimingStore[functionalityName].testGen.endTime = endTimeISO;
+            this.generationTimingStore[functionalityName].testGen.endTimeFormatted = endTimeFormatted;
+            this.generationTimingStore[functionalityName].testGen.duration = duration;
+            this.generationTimingStore[functionalityName].testGen.durationSeconds = durationSeconds;
+            this.generationTimingStore[functionalityName].testGen.durationFormatted = durationFormatted;
+            
+            console.log(`⏱️ [TEST-GEN] Test generation completed at: ${endTimeFormatted}`);
+            console.log(`⏱️ [TEST-GEN] Total time (button click to results): ${durationFormatted} (${durationSeconds} seconds)`);
+            
         } catch (error) {
+            // End timing even on error
+            const endTime = new Date();
+            const endTimeISO = endTime.toISOString();
+            const endTimeFormatted = endTime.toLocaleString();
+            const duration = endTime - startTime;
+            const durationSeconds = (duration / 1000).toFixed(2);
+            const durationFormatted = this.formatDuration(duration);
+            
+            const functionalityName = functionality?.name || functionality;
+            if (this.generationTimingStore[functionalityName] && this.generationTimingStore[functionalityName].testGen) {
+                this.generationTimingStore[functionalityName].testGen.endTime = endTimeISO;
+                this.generationTimingStore[functionalityName].testGen.endTimeFormatted = endTimeFormatted;
+                this.generationTimingStore[functionalityName].testGen.duration = duration;
+                this.generationTimingStore[functionalityName].testGen.durationSeconds = durationSeconds;
+                this.generationTimingStore[functionalityName].testGen.durationFormatted = durationFormatted;
+                this.generationTimingStore[functionalityName].testGen.error = true;
+            }
+            
             console.error('❌ [TESTS] Test generation failed:', error);
             console.error('❌ [TESTS] Error stack:', error.stack);
+            console.log(`⏱️ [TEST-GEN] Test generation failed after: ${durationFormatted} (${durationSeconds} seconds)`);
             this.panel?.webview.postMessage({
                 type: 'showError',
                 message: 'Test generation failed: ' + error.message
@@ -2425,55 +4144,44 @@ def init_db(database_uri='sqlite:///app.db'):
         }
     }
 
-    async generateTestCases(functionality, code, language) {
-        console.log('🧪 [TESTS] Generating test cases using MVC test generator...');
+    async generateTestCases(contract, packet, language) {
+        console.log('🧪 [TESTS] Generating test cases using MVC test generator (TDD Mode)...');
+        console.log('📋 [TESTS] Using generated contract for test generation');
+        console.log('📦 [TESTS] Using embedded packet for SRS context and requirements');
         
         try {
+            if (!contract) {
+                throw new Error('Contract is required for test generation');
+            }
+            
             // Use the TestGenerator class for MVC-aware test generation
             const { TestGenerator } = require('./testGenerator');
             console.log('🧪 [TESTS] TestGenerator class loaded');
             
-            const testGenerator = new TestGenerator(this.context);
+            const testGenerator = new TestGenerator(null);
             console.log('🧪 [TESTS] TestGenerator instance created');
             
-            // Create a feature object that matches what TestGenerator expects
-            const feature = {
-                title: functionality.name || functionality,
-                description: functionality.description || 'Generated functionality',
-                useCases: functionality.useCases || ['Test functionality'],
-                id: functionality.id || functionality.name?.toLowerCase().replace(/[^a-zA-Z0-9]/g, '-') || 'test-feature'
-            };
-            
-            console.log('🧪 [TESTS] Using MVC test generator for feature:', feature.title);
-            console.log('🧪 [TESTS] Feature object:', feature);
-            console.log('🧪 [TESTS] Code provided:', code ? `Yes (${code.length} chars)` : 'No');
-            console.log('🧪 [TESTS] Code preview:', code ? code.substring(0, 200) + '...' : 'N/A');
-            
-            if (!code) {
-                console.warn('⚠️ [TESTS] WARNING: No code provided! Tests will be generated from SRS only (not hybrid approach)');
-                console.warn('⚠️ [TESTS] This means tests may test routes/functions that don\'t exist in the actual code');
+            console.log('🧪 [TESTS] Contract structure:', {
+                functionality: contract.functionality,
+                models: contract.file_structure?.models?.length || 0,
+                controllers: contract.file_structure?.controllers?.length || 0
+            });
+            if (packet) {
+                console.log('📦 [TESTS] Packet context:', {
+                    name: packet.name,
+                    hasDescription: !!packet.description,
+                    useCases: packet.useCases?.length || 0,
+                    requirements: packet.requirements?.length || 0,
+                    hasEmbedding: !!packet.embedding
+                });
             }
+            console.log('🔴 [TDD] Generating tests from contract + packet (independent of code generation)');
             
-            // Determine code file name for imports
-            let codeFileName = null;
-            if (code) {
-                const functionalityName = functionality?.name || functionality?.title || 'unknown_functionality';
-                if (language === 'java') {
-                    const pascalCaseName = functionalityName.replace(/[^a-zA-Z0-9]/g, '')
-                        .replace(/([a-z])([A-Z])/g, '$1$2')
-                        .split(' ')
-                        .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-                        .join('');
-                    codeFileName = pascalCaseName;
-                } else {
-                    codeFileName = functionalityName.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
-                }
-            }
-            
-            const result = await testGenerator.generateTests(feature, code, language, codeFileName);
+            // Generate tests using contract (for structure) and packet (for SRS context)
+            const result = await testGenerator.generateTests(contract, packet, language);
             console.log('🧪 [TESTS] Test generation completed, result length:', result?.length);
-            
-            // Clean the test code (remove any explanatory text and markdown)
+        
+        // Clean the test code (remove any explanatory text and markdown)
             let cleanTestCode = result;
         
         // Remove HTML comments (invalid in Python)
@@ -2594,6 +4302,11 @@ def init_db(database_uri='sqlite:///app.db'):
             cleanTestCode = cleanTestCode.replace(pattern, '');
         });
         
+        // Fix import statements that are missing newlines (e.g., "import osimport re" -> "import os\nimport re")
+        cleanTestCode = cleanTestCode.replace(/(import\s+\w+)(import\s+\w+)/g, '$1\n$2');
+        cleanTestCode = cleanTestCode.replace(/(from\s+\w+\s+import[^\n]+)(import\s+\w+)/g, '$1\n$2');
+        cleanTestCode = cleanTestCode.replace(/(import\s+\w+)(from\s+\w+\s+import)/g, '$1\n$2');
+        
         // Clean up any double newlines
         cleanTestCode = cleanTestCode.replace(/\n\s*\n\s*\n/g, '\n\n').trim();
         
@@ -2679,10 +4392,10 @@ def init_db(database_uri='sqlite:///app.db'):
             console.warn('⚠️ [TESTS] Sanitization warning:', e.message);
         }
         
-            console.log('🧹 [TESTS] Cleaned test code length:', cleanTestCode.length);
-            console.log('🧹 [TESTS] Test code preview:', cleanTestCode.substring(0, 200) + '...');
-            
-            return cleanTestCode;
+        console.log('🧹 [TESTS] Cleaned test code length:', cleanTestCode.length);
+        console.log('🧹 [TESTS] Test code preview:', cleanTestCode.substring(0, 200) + '...');
+        
+        return cleanTestCode;
         } catch (error) {
             console.error('❌ [TESTS] Error in generateTestCases:', error);
             console.error('❌ [TESTS] Error stack:', error.stack);
@@ -2917,6 +4630,11 @@ def init_db(database_uri='sqlite:///app.db'):
             cleanTestCode = cleanTestCode.replace(pattern, '');
         });
         
+        // Fix import statements that are missing newlines (e.g., "import osimport re" -> "import os\nimport re")
+        cleanTestCode = cleanTestCode.replace(/(import\s+\w+)(import\s+\w+)/g, '$1\n$2');
+        cleanTestCode = cleanTestCode.replace(/(from\s+\w+\s+import[^\n]+)(import\s+\w+)/g, '$1\n$2');
+        cleanTestCode = cleanTestCode.replace(/(import\s+\w+)(from\s+\w+\s+import)/g, '$1\n$2');
+        
         // Clean up any double newlines
         cleanTestCode = cleanTestCode.replace(/\n\s*\n\s*\n/g, '\n\n').trim();
         
@@ -2981,6 +4699,23 @@ def init_db(database_uri='sqlite:///app.db'):
                     importsToAdd.push('from io import BytesIO');
                 }
                 
+                // Fix f-string backslash issues (f-string expressions cannot contain backslashes)
+                // Pattern: f"...{re.sub(r'\\W+', '', varName)}..." -> extract to variable first
+                let fStringFixCount = 0;
+                cleanTestCode = cleanTestCode.replace(/f(["'])([^"']*?)\{([^}]*?re\.sub\(r['"]([^'"]+)['"],\s*['"]([^'"]*)['"],\s*([^}]+)\)[^}]*?)\}([^"']*?)\1/g, (match, quote, before, expr, pattern, replacement, varName, after) => {
+                    fStringFixCount++;
+                    // Generate a unique variable name
+                    const cleanedVarName = `_cleaned_${Math.random().toString(36).substring(7)}`;
+                    // Extract the regex operation before the f-string
+                    const extraction = `${cleanedVarName} = re.sub(r'${pattern}', '${replacement}', ${varName.trim()})\n`;
+                    // Replace the f-string expression with the variable
+                    const newFString = `f${quote}${before}{${cleanedVarName}}${after}${quote}`;
+                    return extraction + newFString;
+                });
+                if (fStringFixCount > 0) {
+                    console.log(`✅ [TESTS] Fixed ${fStringFixCount} f-string backslash issue(s)`);
+                }
+                
                 // Add imports if any are needed
                 if (importsToAdd.length > 0) {
                     const newImports = importsToAdd.join('\n') + '\n';
@@ -3034,8 +4769,8 @@ def init_db(database_uri='sqlite:///app.db'):
             const language = this.detectLanguage(testCode);
             console.log('🧪 [TESTS] Detected language for testing:', language);
             
-            // Install appropriate testing framework
-            await this.installTestFramework(projectPath, language);
+            // Install all dependencies (test framework + project dependencies)
+            await this.installAllDependencies(projectPath, language);
             
             // Run tests with appropriate command
             await this.runLanguageTests(projectPath, language);
@@ -3049,43 +4784,341 @@ def init_db(database_uri='sqlite:///app.db'):
         }
     }
 
-    async installTestFramework(projectPath, language) {
-        console.log(`📦 [TESTS] Installing test framework for ${language}...`);
+    async installAllDependencies(projectPath, language) {
+        console.log(`📦 [DEPENDENCIES] Installing all dependencies for ${language}...`);
         
+        const fs = require('fs');
+        const path = require('path');
+        
+        if (language === 'python') {
+            await this.installPythonDependencies(projectPath);
+        } else if (language === 'javascript') {
+            await this.installJavaScriptDependencies(projectPath);
+        } else if (language === 'java') {
+            await this.installJavaDependencies(projectPath);
+        } else if (language === 'csharp') {
+            await this.installCSharpDependencies(projectPath);
+        } else {
+            console.log(`⚠️ [DEPENDENCIES] Auto-installation not yet implemented for ${language}`);
+        }
+    }
+
+    async installPythonDependencies(projectPath) {
+        const fs = require('fs');
+        const path = require('path');
         const { spawn } = require('child_process');
         
-        const installCommands = {
-            'javascript': ['npm', ['install', '--save-dev', 'jest']],
-            'python': ['pip', ['install', 'pytest']],
-            'java': ['mvn', ['dependency:resolve']], // Maven handles JUnit
-            'cpp': ['apt-get', ['install', '-y', 'libgtest-dev', 'cmake']], // For Google Test
-            'csharp': ['dotnet', ['add', 'package', 'NUnit']]
-        };
+        const requirementsPath = path.join(projectPath, 'requirements.txt');
         
-        const command = installCommands[language];
-        if (command && command.length > 0) {
-            const installProcess = spawn(command[0], command[1], {
-                cwd: projectPath,
-                shell: true
-            });
-            
+        // Check if requirements.txt exists
+        if (fs.existsSync(requirementsPath)) {
+            console.log('📦 [PYTHON] Found existing requirements.txt, installing from it...');
             return new Promise((resolve) => {
+                const installProcess = spawn('pip', ['install', '-r', 'requirements.txt'], {
+                cwd: projectPath,
+                    shell: true,
+                    stdio: 'inherit'
+                });
+                
                 installProcess.on('close', (code) => {
                     if (code === 0) {
-                        console.log(`✅ [TESTS] ${language} test framework installed successfully`);
+                        console.log('✅ [PYTHON] All dependencies installed from requirements.txt');
                     } else {
-                        console.log(`⚠️ [TESTS] ${language} test framework installation failed, running tests anyway...`);
+                        console.log('⚠️ [PYTHON] Some dependencies may have failed to install');
                     }
                     resolve();
                 });
             });
         } else {
-            console.log(`✅ [TESTS] ${language} testing is built-in, no installation needed`);
+            // Create comprehensive requirements.txt for Flask projects
+            console.log('📦 [PYTHON] No requirements.txt found, creating comprehensive one...');
+            const requirementsContent = `# Test Framework
+pytest>=7.0.0
+pytest-mock>=3.10.0
+pytest-cov>=4.0.0
+
+# Flask and Web Framework
+flask>=2.0.0
+flask-sqlalchemy>=3.0.0
+flask-mail>=0.9.1
+flask-login>=0.6.2
+werkzeug>=2.0.0
+
+# Database
+sqlalchemy>=2.0.0
+
+# Security and Utilities
+itsdangerous>=2.0.0
+python-dotenv>=1.0.0
+
+# Common utilities
+requests>=2.28.0
+python-dateutil>=2.8.0
+`;
+            
+            try {
+                fs.writeFileSync(requirementsPath, requirementsContent, 'utf8');
+                console.log('✅ [PYTHON] Created requirements.txt with Flask dependencies');
+                
+                // Install the requirements
+            return new Promise((resolve) => {
+                    const installProcess = spawn('pip', ['install', '-r', 'requirements.txt'], {
+                        cwd: projectPath,
+                        shell: true,
+                        stdio: 'inherit'
+                    });
+                    
+                installProcess.on('close', (code) => {
+                    if (code === 0) {
+                            console.log('✅ [PYTHON] All dependencies installed successfully');
+                    } else {
+                            console.log('⚠️ [PYTHON] Some dependencies may have failed to install');
+                    }
+                    resolve();
+                });
+            });
+            } catch (error) {
+                console.log('⚠️ [PYTHON] Failed to create/install requirements.txt:', error.message);
+            }
         }
     }
 
-    runLanguageTests(projectPath, language) {
+    async installJavaScriptDependencies(projectPath) {
+        const fs = require('fs');
+        const path = require('path');
+        const { spawn } = require('child_process');
+        
+        const packageJsonPath = path.join(projectPath, 'package.json');
+        
+        // Check if package.json exists
+        if (fs.existsSync(packageJsonPath)) {
+            console.log('📦 [JAVASCRIPT] Found existing package.json, installing dependencies...');
+            return new Promise((resolve) => {
+                const installProcess = spawn('npm', ['install'], {
+                    cwd: projectPath,
+                    shell: true,
+                    stdio: 'inherit'
+                });
+                
+                installProcess.on('close', (code) => {
+                    if (code === 0) {
+                        console.log('✅ [JAVASCRIPT] All dependencies installed from package.json');
+        } else {
+                        console.log('⚠️ [JAVASCRIPT] Some dependencies may have failed to install');
+                    }
+                    resolve();
+                });
+            });
+        } else {
+            // Install Jest as default test framework
+            console.log('📦 [JAVASCRIPT] No package.json found, installing Jest...');
+            return new Promise((resolve) => {
+                const installProcess = spawn('npm', ['install', '--save-dev', 'jest'], {
+                    cwd: projectPath,
+                    shell: true,
+                    stdio: 'inherit'
+                });
+                
+                installProcess.on('close', (code) => {
+                    if (code === 0) {
+                        console.log('✅ [JAVASCRIPT] Jest installed successfully');
+                    } else {
+                        console.log('⚠️ [JAVASCRIPT] Jest installation failed');
+                    }
+                    resolve();
+                });
+            });
+        }
+    }
+
+    async installJavaDependencies(projectPath) {
+        const { spawn } = require('child_process');
+        
+        console.log('📦 [JAVA] Installing Maven dependencies...');
+        return new Promise((resolve) => {
+            const installProcess = spawn('mvn', ['dependency:resolve'], {
+                cwd: projectPath,
+                shell: true,
+                stdio: 'inherit'
+            });
+            
+            installProcess.on('close', (code) => {
+                if (code === 0) {
+                    console.log('✅ [JAVA] Maven dependencies resolved');
+                } else {
+                    console.log('⚠️ [JAVA] Maven dependency resolution failed');
+                }
+                resolve();
+            });
+        });
+    }
+
+    async installCSharpDependencies(projectPath) {
+        const { spawn } = require('child_process');
+        
+        console.log('📦 [CSHARP] Installing .NET dependencies...');
+        return new Promise((resolve) => {
+            const installProcess = spawn('dotnet', ['restore'], {
+                cwd: projectPath,
+                shell: true,
+                stdio: 'inherit'
+            });
+            
+            installProcess.on('close', (code) => {
+                if (code === 0) {
+                    console.log('✅ [CSHARP] .NET dependencies restored');
+                } else {
+                    console.log('⚠️ [CSHARP] .NET dependency restoration failed');
+                }
+                resolve();
+            });
+        });
+    }
+
+    /**
+     * Get list of functionalities that have test files in the tests directory
+     * Returns array of functionality names that have corresponding test files
+     */
+    getFunctionalitiesWithTestFiles() {
+        const path = require('path');
+        const fs = require('fs');
+        const vscode = require('vscode');
+        
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        if (!workspaceFolder) {
+            return [];
+        }
+        
+        // Try to find the project path
+        let projectName = 'srs-project';
+        if (this.currentSRSFilename) {
+            const baseName = path.parse(this.currentSRSFilename).name;
+            projectName = baseName.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+        }
+        
+        const projectPath = path.join(workspaceFolder.uri.fsPath, projectName);
+        const testsDir = path.join(projectPath, 'tests');
+        
+        if (!fs.existsSync(testsDir)) {
+            return [];
+        }
+        
+        // Read all test files in the tests directory
+        const testFiles = fs.readdirSync(testsDir).filter(file => 
+            file.endsWith('_test.py') || file.endsWith('.test.js') || file.endsWith('Test.java')
+        );
+        
+        console.log('📋 [TESTS] Found test files:', testFiles);
+        
+        // Map test files back to functionality names
+        const functionalitiesWithTests = [];
+        
+        // Get all functionalities to match against
+        const allFunctionalities = this.embeddedPackets || [];
+        
+        testFiles.forEach(testFile => {
+            // Remove test file extension and _test suffix
+            let testBaseName = testFile
+                .replace('_test.py', '')
+                .replace('.test.js', '')
+                .replace('Test.java', '');
+            
+            // Try to match with functionality names
+            allFunctionalities.forEach(func => {
+                const funcName = func.name || '';
+                
+                // Convert functionality name to possible test file patterns
+                const underscorePattern = funcName.toLowerCase()
+                    .replace(/\s+/g, '_')
+                    .replace(/[^a-z0-9_]/g, '_')
+                    .replace(/_+/g, '_')
+                    .replace(/^_|_$/g, '');
+                
+                const hyphenPattern = funcName.toLowerCase()
+                    .replace(/\s+/g, '-')
+                    .replace(/[^a-z0-9-]/g, '-')
+                    .replace(/-+/g, '-')
+                    .replace(/^-|-$/g, '');
+                
+                // Check if test file matches this functionality
+                if (testBaseName === underscorePattern || testBaseName === hyphenPattern) {
+                    if (!functionalitiesWithTests.find(f => f.name === funcName)) {
+                        functionalitiesWithTests.push({
+                            name: funcName,
+                            testFile: testFile
+                        });
+                    }
+                }
+            });
+        });
+        
+        console.log('📋 [TESTS] Functionalities with test files:', functionalitiesWithTests.map(f => f.name));
+        return functionalitiesWithTests;
+    }
+
+    /**
+     * Convert functionality name to test file name
+     * Handles both underscore and hyphen patterns
+     */
+    functionalityToTestFile(functionalityName) {
+        if (!functionalityName) return null;
+        
+        // Convert to snake_case and handle special cases
+        let testFileName = functionalityName
+            .toLowerCase()
+            .replace(/\s+/g, '_')  // Replace spaces with underscores
+            .replace(/[^a-z0-9_]/g, '_')  // Replace special chars with underscores
+            .replace(/_+/g, '_')  // Collapse multiple underscores
+            .replace(/^_|_$/g, '');  // Remove leading/trailing underscores
+        
+        // Check for hyphen pattern (e.g., "product-search" -> "product-search_test.py")
+        const hyphenPattern = functionalityName.toLowerCase().replace(/\s+/g, '-');
+        const hyphenTestFile = `${hyphenPattern}_test.py`;
+        
+        // Check which pattern exists in the tests directory
+        const path = require('path');
+        const fs = require('fs');
+        const vscode = require('vscode');
+        
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        if (workspaceFolder) {
+            // Try to find the project path
+            let projectName = 'srs-project';
+            if (this.currentSRSFilename) {
+                const baseName = path.parse(this.currentSRSFilename).name;
+                projectName = baseName.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+            }
+            
+            const projectPath = path.join(workspaceFolder.uri.fsPath, projectName);
+            const testsDir = path.join(projectPath, 'tests');
+            
+            if (fs.existsSync(testsDir)) {
+                // Check for hyphen pattern first (e.g., product-search_test.py)
+                const hyphenPath = path.join(testsDir, hyphenTestFile);
+                if (fs.existsSync(hyphenPath)) {
+                    return hyphenTestFile;
+                }
+                
+                // Check for underscore pattern (e.g., product_search_test.py)
+                const underscoreTestFile = `${testFileName}_test.py`;
+                const underscorePath = path.join(testsDir, underscoreTestFile);
+                if (fs.existsSync(underscorePath)) {
+                    return underscoreTestFile;
+                }
+            }
+        }
+        
+        // Default to underscore pattern
+        return `${testFileName}_test.py`;
+    }
+
+    runLanguageTests(projectPath, language, testFunctionality = null) {
         console.log(`🧪 [TESTS] Running ${language} tests...`);
+        if (testFunctionality) {
+            console.log(`🧪 [TESTS] Filtering to functionality: ${testFunctionality.name}`);
+        } else {
+            console.log(`🧪 [TESTS] Running all tests`);
+        }
         
         return new Promise((resolve, reject) => {
             const { spawn } = require('child_process');
@@ -3098,7 +5131,22 @@ def init_db(database_uri='sqlite:///app.db'):
         if (language === 'python') {
             const testsDir = path.join(projectPath, 'tests');
             if (fs.existsSync(testsDir)) {
-                testArgs = ['-m', 'pytest', 'tests/', '-v'];
+                if (testFunctionality) {
+                    // Run specific test file
+                    const testFileName = this.functionalityToTestFile(testFunctionality.name);
+                    if (testFileName) {
+                        const testFilePath = path.join('tests', testFileName);
+                        testArgs = ['-m', 'pytest', testFilePath, '-v'];
+                        console.log(`🧪 [TESTS] Running specific test file: ${testFilePath}`);
+                    } else {
+                        // Fallback to all tests if file not found
+                        testArgs = ['-m', 'pytest', 'tests/', '-v'];
+                        console.log(`⚠️ [TESTS] Test file not found, running all tests`);
+                    }
+                } else {
+                    // Run all tests
+                    testArgs = ['-m', 'pytest', 'tests/', '-v'];
+                }
             } else {
                 // Fallback: try to find test files in project
                 testArgs = ['-m', 'pytest', '-v'];
@@ -3166,6 +5214,21 @@ def init_db(database_uri='sqlite:///app.db'):
         testProcess.on('close', (code) => {
             console.log('🧪 [TESTS] Test process exited with code:', code);
             
+            // Parse test counts from output for logging
+            const outputText = testOutput.toString();
+            let parsedPassed = 0, parsedFailed = 0, parsedTotal = 0;
+            
+            // Try to parse pytest output
+            const passedMatch = outputText.match(/(\d+)\s+passed/);
+            const failedMatch = outputText.match(/(\d+)\s+failed/);
+            if (passedMatch) parsedPassed = parseInt(passedMatch[1]);
+            if (failedMatch) parsedFailed = parseInt(failedMatch[1]);
+            parsedTotal = parsedPassed + parsedFailed;
+            
+            if (parsedTotal > 0) {
+                console.log(`📊 [TESTS] Test Summary: ${parsedPassed} passed, ${parsedFailed} failed (Total: ${parsedTotal} tests)`);
+            }
+            
             // Send test results to frontend
             this.panel?.webview.postMessage({
                 type: 'testResults',
@@ -3219,16 +5282,17 @@ def init_db(database_uri='sqlite:///app.db'):
         });
     }
 
-    async handleVerifyCode(functionality, code) {
+    async handleVerifyCode(functionality, code, testFunctionality = null) {
         console.log('🔍 [EXTENSION] handleVerifyCode called');
         console.log('🔍 [EXTENSION] Functionality:', functionality);
         console.log('🔍 [EXTENSION] Code length:', code?.length);
+        console.log('🔍 [EXTENSION] Test Functionality (filter):', testFunctionality?.name || 'All Functionalities');
         
         try {
             // First, export the code to ensure it exists in the project
             console.log('📤 [VERIFY] Exporting code before testing...');
             const language = this.detectLanguage(code);
-            await this.handleExportCode(functionality, code, language);
+            const initialSavedFiles = await this.handleExportCode(functionality, code, language);
             console.log('✅ [VERIFY] Code exported successfully');
             
             // Check if test files exist
@@ -3253,6 +5317,24 @@ def init_db(database_uri='sqlite:///app.db'):
             // Use the already detected language
             console.log('🔍 [VERIFY] Using language:', language);
             
+            // Extract functionality name early (needed for feedback loop)
+            const functionalityName = functionality.name || functionality;
+            console.log('🔍 [VERIFY] Functionality name:', functionalityName);
+            
+            // Get embedded packet and contract (needed for feedback loop)
+            const packet = this.getEmbeddedPacketByName(functionalityName);
+            if (!packet) {
+                throw new Error(`Functionality "${functionalityName}" not found in embedded packets`);
+            }
+            
+            // Get or generate contract (needed for feedback loop)
+            let contract = this.generatedContracts[functionalityName];
+            if (!contract) {
+                console.log('📋 [VERIFY] Contract not found, generating now...');
+                contract = await this.generateContract(packet, language);
+                this.generatedContracts[functionalityName] = contract;
+            }
+            
             let testDir;
             if (language === 'javascript') {
                 testDir = path.join(projectPath, '__tests__');
@@ -3264,8 +5346,8 @@ def init_db(database_uri='sqlite:///app.db'):
             if (!fs.existsSync(testDir)) {
                 console.log('🧪 [VERIFY] No test files found, generating tests automatically...');
                 
-                // Generate test cases
-                const testCode = await this.generateTestCases(functionality, code, language);
+                // Generate test cases using contract and packet (TDD mode)
+                const testCode = await this.generateTestCases(contract, packet, language);
                 
                 // Export test file
                 await this.exportTestFile(functionality, testCode, language);
@@ -3276,14 +5358,10 @@ def init_db(database_uri='sqlite:///app.db'):
             }
             
             // Install test framework if needed
-            await this.installTestFramework(projectPath, language);
+            // Install all dependencies (test framework + project dependencies)
+            await this.installAllDependencies(projectPath, language);
             
-            // Create basic requirements.txt for Python projects to avoid import errors
-            if (language === 'python') {
-                await this.createBasicRequirements(projectPath);
-            }
-            
-            // Create Jest configuration for JavaScript projects
+            // Create Jest configuration for JavaScript projects if needed
             if (language === 'javascript') {
                 await this.createJestConfig(projectPath);
             }
@@ -3294,15 +5372,2077 @@ def init_db(database_uri='sqlite:///app.db'):
                 message: 'Code verification started. Running tests...'
             });
             
+            // Run initial test BEFORE feedback loop
+            console.log('🧪 [INITIAL] Running initial test run...');
+            this.panel?.webview.postMessage({
+                type: 'updateStatus',
+                message: '🧪 Running initial tests...',
+                statusType: 'info'
+            });
+            
+            // Run initial tests
+            const initialTestResult = await this.runLanguageTests(projectPath, language, testFunctionality);
+            const initialTestCounts = this.extractTestCounts(initialTestResult.output, language);
+            
+            // Send initial test results to webview
+            let initialStatusMessage = '';
+            if (initialTestCounts) {
+                initialStatusMessage = `Initial run: ${initialTestCounts.passed} passed, ${initialTestCounts.failed} failed (${initialTestCounts.total} total)`;
+                console.log(`📊 [INITIAL] Initial test results: ${initialTestCounts.passed} passed, ${initialTestCounts.failed} failed (${initialTestCounts.total} total)`);
+            } else {
+                initialStatusMessage = `Initial run: ${initialTestResult.success ? 'All tests passed!' : 'Tests failed'}`;
+            }
+            
+            this.panel?.webview.postMessage({
+                type: 'testResults',
+                results: initialTestResult.output,
+                exitCode: initialTestResult.exitCode,
+                success: initialTestResult.success,
+                iteration: 0,
+                maxIterations: 0,
+                message: initialStatusMessage
+            });
+            
+            // If initial tests pass, we're done
+            if (initialTestResult.success) {
+                console.log(`\n${'='.repeat(60)}`);
+                console.log(`✅ [INITIAL] SUCCESS! All tests passed on initial run!`);
+                console.log(`${'='.repeat(60)}\n`);
+                
+                // Store final results (same as initial since no loop ran)
+                if (initialTestCounts) {
+                    const functionalityName = testFunctionality?.name || functionality?.name || 'All Functionalities';
+                    this.testResultsStore[functionalityName] = {
+                        passed: initialTestCounts.passed,
+                        failed: initialTestCounts.failed,
+                        total: initialTestCounts.total,
+                        initialPassed: initialTestCounts.passed,
+                        initialFailed: initialTestCounts.failed,
+                        initialTotal: initialTestCounts.total,
+                        finalPassed: initialTestCounts.passed,
+                        finalFailed: initialTestCounts.failed,
+                        finalTotal: initialTestCounts.total,
+                        timestamp: new Date().toLocaleString('en-US', { 
+                            year: 'numeric', 
+                            month: '2-digit', 
+                            day: '2-digit', 
+                            hour: '2-digit', 
+                            minute: '2-digit', 
+                            second: '2-digit',
+                            hour12: false 
+                        })
+                    };
+                    
+                    this.panel?.webview.postMessage({
+                        type: 'testResultsStored',
+                        hasResults: Object.keys(this.testResultsStore).length > 0
+                    });
+                }
+                
+                // Display summary (initial = final since no loop)
+                if (initialTestCounts) {
+                    console.log(`\n${'='.repeat(60)}`);
+                    console.log(`📊 [FEEDBACK] TEST RESULTS SUMMARY:`);
+                    console.log(`   Initial Run: ${initialTestCounts.passed} passed, ${initialTestCounts.failed} failed (${initialTestCounts.total} total)`);
+                    console.log(`   Final Run: ${initialTestCounts.passed} passed, ${initialTestCounts.failed} failed (${initialTestCounts.total} total) (No feedback loop needed)`);
+                    console.log(`${'='.repeat(60)}\n`);
+                    
+                    this.panel?.webview.postMessage({
+                        type: 'verificationCompleted',
+                        message: `✅ All tests passed on initial run!`,
+                        success: true,
+                        iteration: 0,
+                        initialTestCounts: initialTestCounts,
+                        finalTestCounts: initialTestCounts
+                    });
+                }
+                return;
+            }
+            
+            // Tests failed - backup original code before feedback loop modifies it
+            if (initialSavedFiles && initialSavedFiles.length > 0) {
+                console.log(`\n${'='.repeat(60)}`);
+                console.log(`📦 [BACKUP] Backing up original code before feedback loop...`);
+                console.log(`${'='.repeat(60)}`);
+                const backupDir = this.backupOriginalCode(projectPath, initialSavedFiles);
+                if (backupDir) {
+                    console.log(`✅ [BACKUP] Original code backed up to: ${backupDir}`);
+            this.panel?.webview.postMessage({
+                type: 'updateStatus',
+                        message: `📦 Original code backed up to: original_code_backup/`,
+                statusType: 'info'
+            });
+                }
+                console.log(`${'='.repeat(60)}\n`);
+            }
+            
+            // Tests failed - start feedback loop
+            console.log(`\n${'='.repeat(60)}`);
+            console.log(`🔄 [FEEDBACK] Initial tests failed. Starting automated feedback loop (max 3 iterations)...`);
+            console.log(`${'='.repeat(60)}\n`);
+            
+            this.panel?.webview.postMessage({
+                type: 'updateStatus',
+                message: '🔄 Initial tests failed. Starting feedback loop (max 3 iterations)...',
+                statusType: 'info'
+            });
+            
+            // Run tests with automated feedback loop
+            const maxIterations = 3; // Prevent infinite loops (reduced from 5 to 3)
+            let iteration = 0;
+            let currentCode = code;
+            let allTestsPassed = false;
+            let finalTestCounts = null; // Store final test results (after all iterations)
+            
+            while (iteration < maxIterations && !allTestsPassed) {
+                iteration++;
+                console.log(`\n${'='.repeat(60)}`);
+                console.log(`🔄 [FEEDBACK] ITERATION ${iteration}/${maxIterations}`);
+                console.log(`${'='.repeat(60)}`);
+                console.log(`📝 [FEEDBACK] Step 1/4: Exporting code...`);
+                    
+                    // Notify user about iteration
+                    this.panel?.webview.postMessage({
+                        type: 'updateStatus',
+                        message: `🔄 [ITERATION ${iteration}/${maxIterations}] Exporting code and running tests...`,
+                        statusType: 'info'
+                    });
+                    
+                    // Export current code
+                    await this.handleExportCode(functionality, currentCode, language);
+                    console.log(`✅ [FEEDBACK] Code exported`);
+            
             // Run tests
-            await this.runLanguageTests(projectPath, language);
+                console.log(`📝 [FEEDBACK] Step 2/4: Running tests...`);
+                const testResult = await this.runLanguageTests(projectPath, language, testFunctionality);
+                
+                // Extract test counts for status message
+                const testCounts = this.extractTestCounts(testResult.output, language);
+                
+                // ALWAYS update finalTestCounts with the latest iteration results
+                // This ensures we track progress even if code doesn't change
+                if (testCounts) {
+                    finalTestCounts = {
+                        passed: testCounts.passed,
+                        failed: testCounts.failed,
+                        total: testCounts.total
+                    };
+                    console.log(`📊 [FEEDBACK] Iteration ${iteration} results: ${finalTestCounts.passed} passed, ${finalTestCounts.failed} failed (${finalTestCounts.total} total)`);
+                }
+                
+                let statusMessage = '';
+                if (testCounts) {
+                    statusMessage = `Iteration ${iteration}/${maxIterations}: ${testCounts.passed} passed, ${testCounts.failed} failed (${testCounts.total} total)`;
+                } else {
+                    statusMessage = `Iteration ${iteration}/${maxIterations}: ${testResult.success ? 'All tests passed!' : 'Tests failed - fixing code...'}`;
+                }
+                
+                // Send test results to webview after each iteration
+                this.panel?.webview.postMessage({
+                    type: 'testResults',
+                    results: testResult.output,
+                    exitCode: testResult.exitCode,
+                    success: testResult.success,
+                    iteration: iteration,
+                    maxIterations: maxIterations,
+                    message: statusMessage
+                });
+                
+                if (testResult.success) {
+                    // finalTestCounts already set above, just use it
+                    
+                    console.log(`\n${'='.repeat(60)}`);
+                    console.log(`✅ [FEEDBACK] SUCCESS! All tests passed!`);
+                    console.log(`📊 [FEEDBACK] Completed in ${iteration} iteration${iteration === 1 ? '' : 's'}`);
+                    
+                    // Display initial vs final metrics
+                    if (initialTestCounts && finalTestCounts) {
+                        console.log(`\n📊 [FEEDBACK] TEST RESULTS SUMMARY:`);
+                        console.log(`   Initial Run: ${initialTestCounts.passed} passed, ${initialTestCounts.failed} failed (${initialTestCounts.total} total)`);
+                        console.log(`   Final Run (after ${iteration} iteration${iteration === 1 ? '' : 's'}): ${finalTestCounts.passed} passed, ${finalTestCounts.failed} failed (${finalTestCounts.total} total)`);
+                        if (initialTestCounts.failed > 0) {
+                            const improvement = initialTestCounts.failed - finalTestCounts.failed;
+                            console.log(`   Improvement: ${improvement} test${improvement === 1 ? '' : 's'} fixed`);
+                        }
+                    }
+                    console.log(`${'='.repeat(60)}\n`);
+                    allTestsPassed = true;
+                    
+                    // Store final successful results (keep only latest - overwrite previous)
+                    if (testCounts) {
+                        // If testFunctionality is null, it means "All Functionalities" was selected
+                        // In that case, use the main functionality name or "All Functionalities"
+                        const functionalityName = testFunctionality?.name || functionality?.name || 'All Functionalities';
+                        this.testResultsStore[functionalityName] = {
+                            passed: testCounts.passed,
+                            failed: testCounts.failed,
+                            total: testCounts.total,
+                            initialPassed: initialTestCounts?.passed || testCounts.passed,
+                            initialFailed: initialTestCounts?.failed || testCounts.failed,
+                            initialTotal: initialTestCounts?.total || testCounts.total,
+                            finalPassed: testCounts.passed,
+                            finalFailed: testCounts.failed,
+                            finalTotal: testCounts.total,
+                            timestamp: new Date().toLocaleString('en-US', { 
+                                year: 'numeric', 
+                                month: '2-digit', 
+                                day: '2-digit', 
+                                hour: '2-digit', 
+                                minute: '2-digit', 
+                                second: '2-digit',
+                                hour12: false 
+                            })
+                        };
+                        console.log(`💾 [TEST-STORE] Stored final results for "${functionalityName}": ${testCounts.passed} passed, ${testCounts.failed} failed (${testCounts.total} total)`);
+                        
+                        // Notify frontend to show export button
+                        this.panel?.webview.postMessage({
+                            type: 'testResultsStored',
+                            hasResults: Object.keys(this.testResultsStore).length > 0
+                        });
+                    }
+                    
+                    // Send success message with both initial and final metrics
+                    this.panel?.webview.postMessage({
+                        type: 'verificationCompleted',
+                        message: `✅ All tests passed after ${iteration} iteration${iteration === 1 ? '' : 's'}!`,
+                        success: true,
+                        iteration: iteration,
+                        initialTestCounts: initialTestCounts,
+                        finalTestCounts: finalTestCounts
+                    });
+                } else {
+                    console.log(`\n${'='.repeat(60)}`);
+                    console.log(`❌ [FEEDBACK] Tests FAILED in iteration ${iteration}`);
+                    console.log(`${'='.repeat(60)}`);
+                    
+                    if (iteration < maxIterations) {
+                        console.log(`📝 [FEEDBACK] Step 3/${iteration === 1 ? '3' : '4'}: Extracting test errors...`);
+                        
+                        // Extract test errors from output
+                        const testErrors = this.extractTestErrors(testResult.output, language);
+                        console.log(`📋 [FEEDBACK] Found ${testErrors.length} test error(s)`);
+                        
+                        // Fix code based on test failures
+                        console.log(`📝 [FEEDBACK] Step 4: Fixing code based on errors...`);
+                        try {
+                            this.panel?.webview.postMessage({
+                                type: 'updateStatus',
+                                message: `🔧 [ITERATION ${iteration}/${maxIterations}] Fixing code based on ${testErrors.length} test error(s)...`,
+                                statusType: 'info'
+                            });
+                            
+                            // CRITICAL: Read actual code from files (not the original code string)
+                            // This ensures we're fixing the current state of the files, not the original
+                            console.log(`📖 [FEEDBACK] Reading current code from files on disk...`);
+                            const currentCodeFromFiles = this.readCodeFromFiles(projectPath, initialSavedFiles || []);
+                            
+                            // Use code from files if available, otherwise fall back to currentCode
+                            const codeToFix = currentCodeFromFiles || currentCode;
+                            if (currentCodeFromFiles) {
+                                console.log(`✅ [FEEDBACK] Using code from files (${codeToFix.length} chars)`);
+                                
+                                // Detailed comparison
+                                const isIdentical = codeToFix === currentCode;
+                                const lengthDiff = Math.abs(codeToFix.length - currentCode.length);
+                                const hash1 = require('crypto').createHash('md5').update(codeToFix).digest('hex');
+                                const hash2 = require('crypto').createHash('md5').update(currentCode).digest('hex');
+                                const hashesMatch = hash1 === hash2;
+                                
+                                console.log(`📊 [FEEDBACK] Code comparison:`);
+                                console.log(`   - String equality: ${isIdentical ? 'IDENTICAL' : 'DIFFERENT'}`);
+                                console.log(`   - Length difference: ${lengthDiff} chars`);
+                                console.log(`   - Hash match: ${hashesMatch ? 'MATCH' : 'DIFFERENT'}`);
+                                console.log(`   - Code from files hash: ${hash1.substring(0, 16)}...`);
+                                console.log(`   - Original code hash: ${hash2.substring(0, 16)}...`);
+                                
+                                if (isIdentical || hashesMatch) {
+                                    console.warn(`⚠️ [FEEDBACK] WARNING: Code from files is IDENTICAL to original code string!`);
+                                    console.warn(`⚠️ [FEEDBACK] This means files on disk haven't changed since initial export.`);
+                                    console.warn(`⚠️ [FEEDBACK] Possible causes:`);
+                                    console.warn(`   1. Previous iteration's export didn't write files correctly`);
+                                    console.warn(`   2. Files were written but with identical content`);
+                                    console.warn(`   3. readCodeFromFiles is reading old cached content`);
+                                    
+                                    // Show first 200 chars of both for manual comparison
+                                    console.log(`📝 [FEEDBACK] Code from files (first 200 chars): ${codeToFix.substring(0, 200)}...`);
+                                    console.log(`📝 [FEEDBACK] Original code (first 200 chars): ${currentCode.substring(0, 200)}...`);
+                                } else {
+                                    console.log(`✅ [FEEDBACK] Code from files is DIFFERENT from original - good!`);
+                                }
+                            } else {
+                                console.warn(`⚠️ [FEEDBACK] Could not read code from files, using original code string`);
+                            }
+                            
+                            console.log(`📝 [FEEDBACK] Code to fix length: ${codeToFix.length} chars`);
+                            console.log(`📝 [FEEDBACK] Code to fix preview (first 200 chars): ${codeToFix.substring(0, 200)}...`);
+                            
+                            const codeBeforeFix = codeToFix;
+                            currentCode = await this.fixCodeBasedOnTestFailures(
+                                functionalityName,
+                                contract,
+                                packet,
+                                codeToFix,
+                                testErrors,
+                                language
+                            );
+                            
+                            // Validate that code actually changed
+                            const codeChanged = currentCode !== codeBeforeFix;
+                            const codeLengthChanged = currentCode.length !== codeBeforeFix.length;
+                            
+                            // Compare first and last 100 chars to detect subtle changes
+                            const beforeStart = codeBeforeFix.substring(0, 100);
+                            const afterStart = currentCode.substring(0, 100);
+                            const beforeEnd = codeBeforeFix.substring(Math.max(0, codeBeforeFix.length - 100));
+                            const afterEnd = currentCode.substring(Math.max(0, currentCode.length - 100));
+                            const startChanged = beforeStart !== afterStart;
+                            const endChanged = beforeEnd !== afterEnd;
+                            
+                            if (!codeChanged && !codeLengthChanged) {
+                                console.warn(`⚠️ [FEEDBACK] WARNING: Fixed code appears IDENTICAL to previous code!`);
+                                console.warn(`⚠️ [FEEDBACK] This means the LLM returned the exact same code without any fixes.`);
+                                console.warn(`⚠️ [FEEDBACK] Original length: ${codeBeforeFix.length}, Fixed length: ${currentCode.length}`);
+                                console.warn(`⚠️ [FEEDBACK] This will cause test results to remain the same.`);
+                            } else {
+                                console.log(`✅ [FEEDBACK] Code fixed successfully`);
+                                console.log(`📊 [FEEDBACK] Code length: ${codeBeforeFix.length} → ${currentCode.length} (${codeLengthChanged ? 'changed' : 'same length'})`);
+                                if (startChanged) console.log(`📝 [FEEDBACK] Code start changed (first 100 chars differ)`);
+                                if (endChanged) console.log(`📝 [FEEDBACK] Code end changed (last 100 chars differ)`);
+                            }
+                            
+                            // Log test count comparison if we have previous results
+                            if (finalTestCounts && testCounts) {
+                                const prevFailed = finalTestCounts.failed;
+                                const currFailed = testCounts.failed;
+                                if (prevFailed === currFailed && prevFailed > 0) {
+                                    console.warn(`⚠️ [FEEDBACK] WARNING: Test failure count unchanged (${currFailed} failed). Code changes may not be effective.`);
+                                } else if (currFailed < prevFailed) {
+                                    console.log(`✅ [FEEDBACK] Improvement detected: ${prevFailed} → ${currFailed} failed tests`);
+                                }
+                            }
+                            
+                            // CRITICAL: Export the fixed code to disk BEFORE the next iteration
+                            // This ensures the next iteration reads the updated code
+                            console.log(`💾 [FEEDBACK] Exporting fixed code to disk...`);
+                            try {
+                                // Read file contents BEFORE export to compare
+                                const filesBeforeExport = {};
+                                if (initialSavedFiles && initialSavedFiles.length > 0) {
+                                    for (const filePath of initialSavedFiles) {
+                                        const fullPath = path.join(projectPath, filePath);
+                                        if (fs.existsSync(fullPath)) {
+                                            filesBeforeExport[filePath] = fs.readFileSync(fullPath, 'utf8');
+                                        }
+                                    }
+                                }
+                                
+                                await this.handleExportCode(functionality, currentCode, language);
+                                console.log(`✅ [FEEDBACK] Fixed code exported successfully`);
+                                
+                                // Verify files actually changed
+                                let filesChanged = 0;
+                                let filesUnchanged = 0;
+                                if (initialSavedFiles && initialSavedFiles.length > 0) {
+                                    for (const filePath of initialSavedFiles) {
+                                        const fullPath = path.join(projectPath, filePath);
+                                        if (fs.existsSync(fullPath)) {
+                                            const contentAfter = fs.readFileSync(fullPath, 'utf8');
+                                            const contentBefore = filesBeforeExport[filePath] || '';
+                                            
+                                            if (contentAfter !== contentBefore) {
+                                                filesChanged++;
+                                                console.log(`✅ [FEEDBACK] File changed: ${filePath} (${contentBefore.length} → ${contentAfter.length} chars)`);
+                                            } else {
+                                                filesUnchanged++;
+                                                console.warn(`⚠️ [FEEDBACK] File UNCHANGED: ${filePath} (${contentAfter.length} chars)`);
+                                            }
+                                        }
+                                    }
+                                    
+                                    console.log(`📊 [FEEDBACK] File change summary: ${filesChanged} changed, ${filesUnchanged} unchanged`);
+                                    if (filesUnchanged > 0 && filesChanged === 0) {
+                                        console.error(`❌ [FEEDBACK] CRITICAL: All files are UNCHANGED! The export may not have worked correctly.`);
+                                    }
+                                }
+                            } catch (exportError) {
+                                console.error(`❌ [FEEDBACK] Failed to export fixed code: ${exportError.message}`);
+                                // Continue anyway - the next iteration will try again
+                            }
+                            
+                            console.log(`🔄 [FEEDBACK] Will retry tests in iteration ${iteration + 1}...\n`);
+                            
+                            // Notify user about the fix attempt
+                            this.panel?.webview.postMessage({
+                                type: 'updateStatus',
+                                message: `✅ Code fixed. Retrying tests in iteration ${iteration + 1}/${maxIterations}...`,
+                                statusType: 'info'
+                            });
+                        } catch (fixError) {
+                            console.error(`\n${'='.repeat(60)}`);
+                            console.error(`❌ [FEEDBACK] Failed to fix code in iteration ${iteration}`);
+                            console.error(`❌ [FEEDBACK] Error: ${fixError.message}`);
+                            console.error(`${'='.repeat(60)}`);
+                            
+                            // If we have more iterations left, continue trying
+                            if (iteration < maxIterations) {
+                                console.log(`⚠️ [FEEDBACK] Fix attempt failed, but continuing to iteration ${iteration + 1}...`);
+                                this.panel?.webview.postMessage({
+                                    type: 'updateStatus',
+                                    message: `⚠️ Fix attempt failed. Retrying with original code in iteration ${iteration + 1}/${maxIterations}...`,
+                                    statusType: 'warning'
+                                });
+                                // Continue with current code (don't update it)
+                                // The loop will continue and try again
+                            } else {
+                                // Last iteration failed, throw error
+                                console.error(`❌ [FEEDBACK] Maximum iterations reached. Cannot continue.\n`);
+                                throw new Error(`Failed to fix code after ${maxIterations} iterations. Last error: ${fixError.message}`);
+                            }
+                        }
+                    } else {
+                        // Last iteration - finalTestCounts already set above from testCounts
+                        // But ensure we have it even if testCounts wasn't extracted
+                        if (!finalTestCounts) {
+                            finalTestCounts = this.extractTestCounts(testResult.output, language);
+                        }
+                        let finalStatusMessage = `Test results available after ${maxIterations} iterations.`;
+                        if (finalTestCounts) {
+                            finalStatusMessage = `Test results available after ${maxIterations} iterations: ${finalTestCounts.passed} passed, ${finalTestCounts.failed} failed (${finalTestCounts.total} total)`;
+                            
+                            // Store final test results (keep only latest - overwrite previous)
+                            const functionalityName = testFunctionality?.name || functionality?.name || 'All Functionalities';
+                            this.testResultsStore[functionalityName] = {
+                                passed: finalTestCounts.passed,
+                                failed: finalTestCounts.failed,
+                                total: finalTestCounts.total,
+                                initialPassed: initialTestCounts?.passed || finalTestCounts.passed,
+                                initialFailed: initialTestCounts?.failed || finalTestCounts.failed,
+                                initialTotal: initialTestCounts?.total || finalTestCounts.total,
+                                finalPassed: finalTestCounts.passed,
+                                finalFailed: finalTestCounts.failed,
+                                finalTotal: finalTestCounts.total,
+                                timestamp: new Date().toLocaleString('en-US', { 
+                                    year: 'numeric', 
+                                    month: '2-digit', 
+                                    day: '2-digit', 
+                                    hour: '2-digit', 
+                                    minute: '2-digit', 
+                                    second: '2-digit',
+                                    hour12: false 
+                                })
+                            };
+                            console.log(`💾 [TEST-STORE] Stored final results for "${functionalityName}": ${finalTestCounts.passed} passed, ${finalTestCounts.failed} failed (${finalTestCounts.total} total)`);
+                            
+                            // Notify frontend to show export button
+                            this.panel?.webview.postMessage({
+                                type: 'testResultsStored',
+                                hasResults: Object.keys(this.testResultsStore).length > 0
+                            });
+                        }
+                        
+                        console.log(`\n${'='.repeat(60)}`);
+                        console.log(`📊 [FEEDBACK] Maximum iterations (${maxIterations}) reached`);
+                        
+                        // Display initial vs final metrics
+                        if (initialTestCounts && finalTestCounts) {
+                            console.log(`\n📊 [FEEDBACK] TEST RESULTS SUMMARY:`);
+                            console.log(`   Initial Run: ${initialTestCounts.passed} passed, ${initialTestCounts.failed} failed (${initialTestCounts.total} total)`);
+                            console.log(`   Final Run (after ${maxIterations} iterations): ${finalTestCounts.passed} passed, ${finalTestCounts.failed} failed (${finalTestCounts.total} total)`);
+                            
+                            // Detailed comparison
+                            const initialPassed = initialTestCounts.passed || 0;
+                            const initialFailed = initialTestCounts.failed || 0;
+                            const finalPassed = finalTestCounts.passed || 0;
+                            const finalFailed = finalTestCounts.failed || 0;
+                            
+                            console.log(`   📊 Comparison:`);
+                            console.log(`      Passed: ${initialPassed} → ${finalPassed} (${finalPassed - initialPassed >= 0 ? '+' : ''}${finalPassed - initialPassed})`);
+                            console.log(`      Failed: ${initialFailed} → ${finalFailed} (${finalFailed - initialFailed >= 0 ? '+' : ''}${finalFailed - initialFailed})`);
+                            
+                            if (initialTestCounts.failed > 0) {
+                                const improvement = initialTestCounts.failed - finalTestCounts.failed;
+                                if (improvement === 0) {
+                                    console.warn(`   ⚠️  WARNING: No improvement - same number of failures (${finalTestCounts.failed} failed)`);
+                                    console.warn(`   ⚠️  This suggests the code fixes are not working or code is not changing.`);
+                                } else {
+                                    console.log(`   ✅ Improvement: ${improvement} test${improvement === 1 ? '' : 's'} fixed`);
+                                }
+                            }
+                        } else if (finalTestCounts) {
+                            console.log(`📊 [FEEDBACK] Final test results: ${finalTestCounts.passed} passed, ${finalTestCounts.failed} failed (${finalTestCounts.total} total)`);
+                        } else {
+                            console.warn(`⚠️ [FEEDBACK] WARNING: Could not extract final test counts!`);
+                            }
+                        console.log(`${'='.repeat(60)}\n`);
+                        
+                        // Send final status message with both metrics
+                        this.panel?.webview.postMessage({
+                            type: 'testResultsSummary',
+                            message: finalStatusMessage,
+                            statusType: 'info',
+                            initialTestCounts: initialTestCounts,
+                            finalTestCounts: finalTestCounts,
+                            iterations: maxIterations,
+                            allTestsPassed: false
+                        });
+                    }
+                }
+            }
+            
+            // Display final summary with both initial and final metrics (if loop ran)
+            if (!initialTestResult.success && initialTestCounts && finalTestCounts) {
+                console.log(`\n${'='.repeat(60)}`);
+                console.log(`📊 [FEEDBACK] FINAL TEST RESULTS SUMMARY`);
+                console.log(`${'='.repeat(60)}`);
+                console.log(`   Initial Run: ${initialTestCounts.passed} passed, ${initialTestCounts.failed} failed (${initialTestCounts.total} total)`);
+                const iterationsText = allTestsPassed ? `after ${iteration} iteration${iteration === 1 ? '' : 's'}` : `after ${maxIterations} iterations`;
+                console.log(`   Final Run (${iterationsText}): ${finalTestCounts.passed} passed, ${finalTestCounts.failed} failed (${finalTestCounts.total} total)`);
+                if (initialTestCounts.failed > 0) {
+                    const improvement = initialTestCounts.failed - finalTestCounts.failed;
+                    console.log(`   Improvement: ${improvement} test${improvement === 1 ? '' : 's'} fixed`);
+                }
+                console.log(`${'='.repeat(60)}\n`);
+                
+                // Send final summary to dashboard (if not already sent)
+                if (!allTestsPassed) {
+                    this.panel?.webview.postMessage({
+                        type: 'testResultsSummary',
+                        initialTestCounts: initialTestCounts,
+                        finalTestCounts: finalTestCounts,
+                        iterations: maxIterations,
+                        allTestsPassed: false
+                    });
+                }
+            }
+            
+            if (!allTestsPassed) {
+                // Final message already sent in the loop when max iterations reached
+                // Just log and return (don't throw error)
+                console.log(`\n${'='.repeat(60)}`);
+                console.log(`📊 [FEEDBACK] Test results available after ${maxIterations} iterations`);
+                console.log(`${'='.repeat(60)}\n`);
+                return;
+            }
             
         } catch (error) {
             console.error('❌ [VERIFY] Code verification failed:', error.message);
+            
+            // Check if it's the "max iterations" error - if so, show friendly message
+            if (error.message.includes('iterations')) {
+                this.panel?.webview.postMessage({
+                    type: 'updateStatus',
+                    message: `Test results available after ${maxIterations} iterations.`,
+                    statusType: 'info'
+                });
+            } else {
             this.panel?.webview.postMessage({
                 type: 'showError',
                 message: 'Code verification failed: ' + error.message
             });
+            }
+        }
+    }
+
+    /**
+     * Extract test counts (passed, failed, total) from test output
+     * Returns {passed: number, failed: number, total: number} or null if not found
+     */
+    extractTestCounts(testOutput, language) {
+        if (!testOutput) return null;
+        
+        const resultsText = testOutput.toString();
+        let passedTests = 0;
+        let failedTests = 0;
+        let totalTests = 0;
+        
+        // First, count individual test results as ground truth
+        const passedMatches = resultsText.match(/\bPASSED\s+\[/g);
+        const failedMatches = resultsText.match(/\bFAILED\s+\[/g);
+        const individualPassed = passedMatches ? passedMatches.length : 0;
+        const individualFailed = failedMatches ? failedMatches.length : 0;
+        const individualTotal = individualPassed + individualFailed;
+        
+        // Pytest pattern: "X passed, Y failed in Zs" (final summary line) - CHECK THIS FIRST
+        const summaryMatch = resultsText.match(/(\d+)\s+passed.*?(\d+)\s+failed.*?in/);
+        if (summaryMatch) {
+            passedTests = parseInt(summaryMatch[1]);
+            failedTests = parseInt(summaryMatch[2]);
+            totalTests = passedTests + failedTests;
+            
+            // Verify summary matches individual counts (if we have individual counts)
+            if (individualTotal > 0 && (passedTests !== individualPassed || failedTests !== individualFailed)) {
+                console.warn(`⚠️ [TEST-COUNTS] Summary mismatch! Summary: ${passedTests} passed, ${failedTests} failed | Individual: ${individualPassed} passed, ${individualFailed} failed`);
+                // Use individual counts as they're more accurate
+                return { passed: individualPassed, failed: individualFailed, total: individualTotal };
+            }
+            
+            return { passed: passedTests, failed: failedTests, total: totalTests };
+        }
+        
+        // Pytest pattern: "X passed in Zs" (no failures)
+        const passedOnlyMatch = resultsText.match(/(\d+)\s+passed.*?in/);
+        if (passedOnlyMatch && !resultsText.includes('failed')) {
+            passedTests = parseInt(passedOnlyMatch[1]);
+            totalTests = passedTests;
+            return { passed: passedTests, failed: 0, total: totalTests };
+        }
+        
+        // Pytest pattern: "X passed, Y failed" (without "in")
+        if (resultsText.includes('passed') && resultsText.includes('failed')) {
+            const passedMatch = resultsText.match(/(\d+)\s+passed/);
+            const failedMatch = resultsText.match(/(\d+)\s+failed/);
+            if (passedMatch) passedTests = parseInt(passedMatch[1]);
+            if (failedMatch) failedTests = parseInt(failedMatch[1]);
+            if (passedTests > 0 || failedTests > 0) {
+                totalTests = passedTests + failedTests;
+                return { passed: passedTests, failed: failedTests, total: totalTests };
+            }
+        }
+        
+        // Pytest pattern: "X passed" (no failures, without "in")
+        if (resultsText.includes('passed') && !resultsText.includes('failed')) {
+            const match = resultsText.match(/(\d+)\s+passed/);
+            if (match) {
+                passedTests = parseInt(match[1]);
+                return { passed: passedTests, failed: 0, total: passedTests };
+            }
+        }
+        
+        // FALLBACK: Use individual test counts if summary line is missing
+        if (individualTotal > 0) {
+            console.log(`🔍 [TEST-COUNTS] Using individual test counts: ${individualPassed} passed, ${individualFailed} failed (${individualTotal} total)`);
+            return { passed: individualPassed, failed: individualFailed, total: individualTotal };
+        }
+        
+        // Check for "collected X items" as last resort
+        const collectedMatch = resultsText.match(/collected\s+(\d+)\s+items?/);
+        if (collectedMatch) {
+            totalTests = parseInt(collectedMatch[1]);
+            // If we counted individual tests, use those; otherwise return collected count
+            if (passedTests > 0 || failedTests > 0) {
+                return { passed: passedTests, failed: failedTests, total: totalTests };
+            }
+            return { passed: 0, failed: 0, total: totalTests };
+        }
+        
+        return null;
+    }
+
+    formatDuration(milliseconds) {
+        const seconds = Math.floor(milliseconds / 1000);
+        const minutes = Math.floor(seconds / 60);
+        const hours = Math.floor(minutes / 60);
+        
+        if (hours > 0) {
+            return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+        } else if (minutes > 0) {
+            return `${minutes}m ${seconds % 60}s`;
+        } else {
+            return `${seconds}s`;
+        }
+    }
+
+    async handleExportCsv() {
+        console.log('📊 [CSV-EXPORT] Exporting test results to CSV...');
+        
+        try {
+            // Check if we have any stored results
+            if (!this.testResultsStore || Object.keys(this.testResultsStore).length === 0) {
+                vscode.window.showWarningMessage('No test results to export. Please run tests first.');
+                return;
+            }
+            
+            // Get workspace folder
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            if (!workspaceFolder) {
+                vscode.window.showErrorMessage('No workspace folder found. Please open a workspace first.');
+                return;
+            }
+            
+            // Generate CSV filename from SRS name
+            let csvFilename = 'test_results.csv'; // Default fallback
+            if (this.currentSRSFilename) {
+                const baseName = path.parse(this.currentSRSFilename).name;
+                const sanitized = baseName.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+                csvFilename = `${sanitized}_test_results.csv`;
+            }
+            
+            const csvPath = path.join(workspaceFolder.uri.fsPath, csvFilename);
+            
+            // Generate CSV content
+            const csvRows = [];
+            csvRows.push('Functionality,Total Tests,Initial Pass,Initial Failed,Initial Pass Rate (%),Final Pass,Final Failed,Final Pass Rate (%),Code Gen Start Time,Code Gen Duration (s),Test Gen Start Time,Test Gen Duration (s)');
+            
+            // Sort functionalities alphabetically
+            const sortedFunctionalities = Object.keys(this.testResultsStore).sort();
+            
+            for (const functionalityName of sortedFunctionalities) {
+                const result = this.testResultsStore[functionalityName];
+                
+                // Escape commas and quotes in functionality name
+                const escapedName = `"${functionalityName.replace(/"/g, '""')}"`;
+                
+                // Get initial results
+                const initialPassed = result.initialPassed !== undefined ? result.initialPassed : result.passed;
+                const initialFailed = result.initialFailed !== undefined ? result.initialFailed : result.failed;
+                const initialTotal = result.initialTotal !== undefined ? result.initialTotal : result.total;
+                const initialPassRate = initialTotal > 0 ? ((initialPassed / initialTotal) * 100).toFixed(2) : '0.00';
+                
+                // Get final results (feedback results)
+                const finalPassed = result.finalPassed !== undefined ? result.finalPassed : result.passed;
+                const finalFailed = result.finalFailed !== undefined ? result.finalFailed : result.failed;
+                const finalTotal = result.finalTotal !== undefined ? result.finalTotal : result.total;
+                const finalPassRate = finalTotal > 0 ? ((finalPassed / finalTotal) * 100).toFixed(2) : '0.00';
+                
+                // Use total tests (prefer final total, fallback to initial total)
+                const totalTests = result.total || finalTotal || initialTotal || 0;
+                
+                // Get timing data
+                const timing = this.generationTimingStore[functionalityName] || {};
+                const codeGenTiming = timing.codeGen || {};
+                const testGenTiming = timing.testGen || {};
+                
+                const codeGenStartTime = codeGenTiming.startTimeFormatted || codeGenTiming.startTime || 'N/A';
+                const codeGenDuration = codeGenTiming.durationSeconds || (codeGenTiming.duration ? (codeGenTiming.duration / 1000).toFixed(2) : 'N/A');
+                const testGenStartTime = testGenTiming.startTimeFormatted || testGenTiming.startTime || 'N/A';
+                const testGenDuration = testGenTiming.durationSeconds || (testGenTiming.duration ? (testGenTiming.duration / 1000).toFixed(2) : 'N/A');
+                
+                csvRows.push(`${escapedName},${totalTests},${initialPassed},${initialFailed},${initialPassRate},${finalPassed},${finalFailed},${finalPassRate},"${codeGenStartTime}",${codeGenDuration},"${testGenStartTime}",${testGenDuration}`);
+            }
+            
+            const csvContent = csvRows.join('\n');
+            
+            // Write CSV file
+            fs.writeFileSync(csvPath, csvContent, 'utf8');
+            
+            console.log(`✅ [CSV-EXPORT] CSV exported successfully to: ${csvPath}`);
+            console.log(`📊 [CSV-EXPORT] Exported ${sortedFunctionalities.length} functionality result(s)`);
+            
+            // Show success message
+            vscode.window.showInformationMessage(`Test results exported to ${csvFilename}`, 'Open File').then(selection => {
+                if (selection === 'Open File') {
+                    vscode.workspace.openTextDocument(csvPath).then(doc => {
+                        vscode.window.showTextDocument(doc);
+                    });
+                }
+            });
+            
+            // Notify frontend
+            this.panel?.webview.postMessage({
+                type: 'csvExportSuccess',
+                message: `Test results exported to ${csvFilename}`,
+                filePath: csvPath
+            });
+            
+        } catch (error) {
+            console.error('❌ [CSV-EXPORT] Error exporting CSV:', error);
+            vscode.window.showErrorMessage(`Failed to export CSV: ${error.message}`);
+            
+            this.panel?.webview.postMessage({
+                type: 'csvExportError',
+                message: `Failed to export CSV: ${error.message}`
+            });
+        }
+    }
+
+    extractTestErrors(testOutput, language) {
+        console.log('🔍 [FEEDBACK] Extracting test errors from output...');
+        
+        const errors = [];
+        
+        if (language === 'python') {
+            // Parse pytest output for failures
+            const lines = testOutput.split('\n');
+            let currentError = null;
+            
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                
+                // Match test failure header: "FAILED test_file.py::test_function"
+                const failureMatch = line.match(/FAILED\s+(.+?::.+?)\s+-/);
+                if (failureMatch) {
+                    if (currentError) {
+                        errors.push(currentError);
+                    }
+                    currentError = {
+                        test: failureMatch[1],
+                        error: '',
+                        traceback: [],
+                        fullError: []
+                    };
+                }
+                
+                // Match assertion errors: "AssertionError: message"
+                if (currentError && line.includes('AssertionError:')) {
+                    const errorMsg = line.split('AssertionError:')[1]?.trim() || 'Assertion failed';
+                    currentError.error = errorMsg;
+                    currentError.fullError.push(line);
+                    
+                    // Extract route path from error if it's a route test
+                    const routeMatch = errorMsg.match(/Route\s+['"]([^'"]+)['"]/);
+                    if (routeMatch) {
+                        currentError.missingRoute = routeMatch[1];
+                        currentError.isRouteError = true;
+                    }
+                }
+                
+                // Match 404 errors (missing routes)
+                if (currentError && line.includes('404') && line.includes('NOT FOUND')) {
+                    currentError.isRouteError = true;
+                    currentError.error = 'Route returned 404 NOT FOUND - route is missing or not registered';
+                }
+                
+                // Match other errors: "ErrorType: message"
+                if (currentError && !currentError.error && line.match(/^\w+Error:/)) {
+                    currentError.error = line;
+                    
+                    // Detect SQLAlchemy DetachedInstanceError
+                    if (line.includes('DetachedInstanceError')) {
+                        currentError.isSQLAlchemyError = true;
+                        currentError.errorType = 'DetachedInstanceError';
+                        currentError.error += '\n\n🔴 SQLALCHEMY SESSION ERROR: Object is detached from session. This happens when you try to access model attributes outside the app context or after session is closed.';
+                    }
+                    
+                    // Detect FileNotFoundError
+                    if (line.includes('FileNotFoundError')) {
+                        currentError.isFileSystemError = true;
+                        currentError.errorType = 'FileNotFoundError';
+                    }
+                }
+                
+                // Collect traceback lines and error details
+                if (currentError) {
+                    if (line.includes('  File ') || line.includes('    ')) {
+                    currentError.traceback.push(line);
+                    }
+                    
+                    // Check for SQLAlchemy DetachedInstanceError in any line
+                    if (line.includes('DetachedInstanceError') && !currentError.isSQLAlchemyError) {
+                        currentError.isSQLAlchemyError = true;
+                        currentError.errorType = 'DetachedInstanceError';
+                        if (!currentError.error.includes('DetachedInstanceError')) {
+                            currentError.error = 'DetachedInstanceError: Instance is not bound to a Session - accessing model attributes outside session context';
+                        }
+                    }
+                    
+                    // Check for FileNotFoundError in any line
+                    if (line.includes('FileNotFoundError') && !currentError.isFileSystemError) {
+                        currentError.isFileSystemError = true;
+                        currentError.errorType = 'FileNotFoundError';
+                        const pathMatch = line.match(/directory: ['"](.+?)['"]/);
+                        if (pathMatch) {
+                            currentError.missingPath = pathMatch[1];
+                        }
+                    }
+                    
+                    // Check for "DID NOT RAISE" in any line
+                    if (line.includes('DID NOT RAISE') && !currentError.isLogicError) {
+                        currentError.isLogicError = true;
+                        const exceptionMatch = line.match(/DID NOT RAISE.*?<class '(\w+)'>/);
+                        if (exceptionMatch) {
+                            currentError.expectedException = exceptionMatch[1];
+                        }
+                    }
+                    
+                    // Check for LocalProxy assertion errors
+                    if (line.includes('LocalProxy') && line.includes('is None') && !currentError.isLocalProxyError) {
+                        currentError.isLocalProxyError = true;
+                    }
+                    
+                    // Collect assertion details
+                    if (line.includes('assert ') || line.includes('AssertionError')) {
+                        currentError.fullError.push(line);
+                    }
+                    
+                    // Collect route/URL details
+                    if (line.includes('/dashboard/') || line.includes('/api/')) {
+                        const urlMatch = line.match(/['"]([\/\w-]+)['"]/);
+                        if (urlMatch) {
+                            currentError.missingRoute = urlMatch[1];
+                            currentError.isRouteError = true;
+                        }
+                    }
+                }
+                
+                // Match SQLAlchemy DetachedInstanceError
+                const detachedErrorMatch = line.match(/DetachedInstanceError:.*Instance.*is not bound to a Session/);
+                if (detachedErrorMatch) {
+                    errors.push({
+                        test: currentError?.test || 'SQLAlchemy Session Error',
+                        error: 'DetachedInstanceError: Instance is not bound to a Session - accessing model attributes outside session context',
+                        traceback: [line],
+                        isSQLAlchemyError: true,
+                        errorType: 'DetachedInstanceError',
+                        fullError: [line]
+                    });
+                }
+                
+                // Match FileNotFoundError
+                const fileNotFoundMatch = line.match(/FileNotFoundError:.*No such file or directory/);
+                if (fileNotFoundMatch) {
+                    const pathMatch = line.match(/directory: ['"](.+?)['"]/);
+                    errors.push({
+                        test: currentError?.test || 'File System Error',
+                        error: `FileNotFoundError: Directory does not exist - ${pathMatch ? pathMatch[1] : 'path not found'}`,
+                        traceback: [line],
+                        isFileSystemError: true,
+                        errorType: 'FileNotFoundError',
+                        missingPath: pathMatch ? pathMatch[1] : null,
+                        fullError: [line]
+                    });
+                }
+                
+                // Match "DID NOT RAISE" errors (functions not raising exceptions)
+                if (line.includes('DID NOT RAISE')) {
+                    const exceptionMatch = line.match(/DID NOT RAISE.*?<class '(\w+)'>/);
+                    errors.push({
+                        test: currentError?.test || 'Exception Test',
+                        error: `Function did not raise expected exception: ${exceptionMatch ? exceptionMatch[1] : 'Exception'}`,
+                        traceback: [line],
+                        isLogicError: true,
+                        expectedException: exceptionMatch ? exceptionMatch[1] : 'Exception',
+                        fullError: [line]
+                    });
+                }
+                
+                // Match LocalProxy assertion errors
+                if (line.includes('LocalProxy') && line.includes('is None')) {
+                    errors.push({
+                        test: currentError?.test || 'LocalProxy Error',
+                        error: 'Function returned LocalProxy object instead of None or actual value',
+                        traceback: [line],
+                        isLocalProxyError: true,
+                        fullError: [line]
+                    });
+                }
+                
+                // Match import errors: "ModuleNotFoundError: No module named 'X'"
+                const importErrorMatch = line.match(/ModuleNotFoundError: No module named ['"](.+?)['"]/);
+                if (importErrorMatch) {
+                    const missingModule = importErrorMatch[1];
+                    // Check if this is a model/controller that shouldn't exist according to contract
+                    const isContractViolation = missingModule.includes('email_verification_token') || 
+                                                missingModule.includes('EmailVerificationToken') ||
+                                                missingModule.includes('email_service') ||
+                                                missingModule.includes('EmailService');
+                    
+                    errors.push({
+                        test: 'Import Error',
+                        error: `Missing module: ${missingModule}${isContractViolation ? ' (CONTRACT VIOLATION: This model/service is NOT in the contract!)' : ''}`,
+                        traceback: [line],
+                        isContractViolation: isContractViolation,
+                        missingModule: missingModule
+                    });
+                }
+                
+                // Match ImportError: "cannot import name 'X' from 'Y'"
+                const importNameErrorMatch = line.match(/ImportError: cannot import name ['"](.+?)['"] from ['"](.+?)['"]/);
+                if (importNameErrorMatch) {
+                    const missingName = importNameErrorMatch[1];
+                    const fromModule = importNameErrorMatch[2];
+                    const isCircularImport = line.includes('partially initialized module') || line.includes('circular import');
+                    errors.push({
+                        test: 'Import Error',
+                        error: `Cannot import '${missingName}' from '${fromModule}'${isCircularImport ? ' (CIRCULAR IMPORT DETECTED)' : ''}`,
+                        traceback: [line],
+                        missingName: missingName,
+                        fromModule: fromModule,
+                        isCircularImport: isCircularImport
+                    });
+                }
+                
+                // Match SyntaxError in test files
+                const syntaxErrorMatch = line.match(/SyntaxError: (.+?)\s+File ["'](.+?)["'], line (\d+)/);
+                if (syntaxErrorMatch) {
+                    const syntaxError = syntaxErrorMatch[1];
+                    const filePath = syntaxErrorMatch[2];
+                    const lineNum = syntaxErrorMatch[3];
+                    errors.push({
+                        test: 'Syntax Error',
+                        error: `SyntaxError: ${syntaxError} in ${filePath} at line ${lineNum}`,
+                        traceback: [line],
+                        isSyntaxError: true,
+                        syntaxError: syntaxError,
+                        errorFile: filePath,
+                        errorLine: lineNum,
+                        fullError: [line]
+                    });
+                }
+                
+                // Match TypeError: "Blueprint.__init__() got multiple values for argument 'import_name'"
+                const blueprintErrorMatch = line.match(/TypeError: Blueprint\.__init__\(\) got multiple values for argument ['"]import_name['"]/);
+                if (blueprintErrorMatch) {
+                    errors.push({
+                        test: 'Blueprint Initialization Error',
+                        error: 'Blueprint.__init__() got multiple values for argument \'import_name\'',
+                        traceback: [line],
+                        isBlueprintError: true,
+                        fixHint: 'Remove import_name=__name__ keyword argument. Use: Blueprint(\'name\', __name__) instead of Blueprint(\'name\', __name__, import_name=__name__)'
+                    });
+                }
+                
+                // Match SQLAlchemy InvalidRequestError: "Table 'X' is already defined"
+                const tableAlreadyDefinedMatch = line.match(/InvalidRequestError: Table ['"](.+?)['"] is already defined/);
+                if (tableAlreadyDefinedMatch) {
+                    const tableName = tableAlreadyDefinedMatch[1];
+                    errors.push({
+                        test: currentError?.test || 'Table Definition Error',
+                        error: `InvalidRequestError: Table '${tableName}' is already defined for this MetaData instance. Specify 'extend_existing=True' to redefine options and columns on an existing Table object.`,
+                        traceback: [line],
+                        isTableConflictError: true,
+                        tableName: tableName,
+                        fullError: [line],
+                        fixHint: `Table '${tableName}' already exists. Either use shared model import, use unique table name, or add __table_args__ = {'extend_existing': True}`
+                    });
+                }
+            }
+            
+            if (currentError) {
+                errors.push(currentError);
+            }
+        } else if (language === 'javascript') {
+            // Parse Jest output for failures
+            const lines = testOutput.split('\n');
+            let currentError = null;
+            
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                
+                // Match test failure: "FAIL test/path.test.js"
+                const failureMatch = line.match(/FAIL\s+(.+?\.test\.(js|ts))/);
+                if (failureMatch) {
+                    if (currentError) {
+                        errors.push(currentError);
+                    }
+                    currentError = {
+                        test: failureMatch[1],
+                        error: '',
+                        traceback: []
+                    };
+                }
+                
+                // Match error messages: "Error: message"
+                if (currentError && line.match(/^\s*Error:/)) {
+                    currentError.error = line.trim();
+                }
+                
+                // Collect stack trace
+                if (currentError && (line.includes('    at ') || line.includes('      at '))) {
+                    currentError.traceback.push(line);
+                }
+            }
+            
+            if (currentError) {
+                errors.push(currentError);
+            }
+        }
+        
+        // If no structured errors found, return the full output
+        if (errors.length === 0) {
+            errors.push({
+                test: 'Unknown',
+                error: 'Test execution failed',
+                traceback: testOutput.split('\n').slice(0, 50) // First 50 lines
+            });
+        }
+        
+        console.log(`📋 [FEEDBACK] Extracted ${errors.length} test error(s)`);
+        return errors;
+    }
+
+    async fixCodeBasedOnTestFailures(functionalityName, contract, packet, currentCode, testErrors, language) {
+        console.log('🔧 [FEEDBACK] Fixing code based on test failures...');
+        console.log(`📋 [FEEDBACK] Contract structure:`, {
+            models: contract.file_structure?.models?.map(m => m.class_name).join(', ') || 'NONE',
+            controllers: contract.file_structure?.controllers?.map(c => c.file_path).join(', ') || 'NONE'
+        });
+        console.log(`📋 [FEEDBACK] Test errors:`, testErrors.length);
+        
+        const vscode = require('vscode');
+        const config = vscode.workspace.getConfiguration('kinmail');
+        const apiKey = config.get('openaiApiKey');
+        
+        if (!apiKey) {
+            throw new Error('OpenAI API key not configured');
+        }
+        
+        // Build error summary with contract violation warnings
+        const errorSummary = testErrors.map((err, idx) => {
+            let errorMsg = `Error ${idx + 1}:
+Test: ${err.test}
+Error: ${err.error}`;
+            
+            // Add specific guidance for route errors (404 - missing routes)
+            if (err.isRouteError && err.missingRoute) {
+                errorMsg += `\n\n🔴 MISSING ROUTE DETECTED:
+The route "${err.missingRoute}" is NOT registered in Flask.
+This means either:
+1. The route is not defined in the controller file
+2. The blueprint is not registered in app.py
+3. The route path doesn't match the blueprint prefix
+
+FIX REQUIRED:
+- Check if the route is defined in the controller: @blueprint.route("${err.missingRoute}")
+- Check if the blueprint is registered in app.py: app.register_blueprint(blueprint_name)
+- Ensure the blueprint has the correct URL prefix if needed
+- For "/dashboard/products", the route should be defined as: @blueprint.route("/products") if blueprint has prefix="/dashboard"
+- For "/api/dashboard/products", the route should be defined as: @blueprint.route("/products") if blueprint has prefix="/api/dashboard"
+- CRITICAL: Make sure app.py imports and registers the blueprint: from controllers.{controller_name} import {blueprint_name}; app.register_blueprint({blueprint_name})`;
+            } else if (err.isRouteError) {
+                errorMsg += `\n\n🔴 ROUTE ERROR DETECTED:
+A route test is failing because the route is missing or not registered.
+Check:
+1. Is the route defined in the controller?
+2. Is the blueprint registered in app.py?
+3. Does the route path match what the test expects?`;
+            }
+            
+            // Add specific guidance for contract violations
+            if (err.isContractViolation) {
+                errorMsg += `\n\n🔴 CONTRACT VIOLATION DETECTED:
+The code is trying to import '${err.missingModule}' which is NOT defined in the contract.
+The contract only defines these models: ${contract.file_structure?.models?.map(m => m.class_name).join(', ') || 'NONE'}
+You MUST remove this import and use only models defined in the contract.`;
+            }
+            
+            if (err.missingModule && (err.missingModule.includes('email_verification_token') || err.missingModule.includes('EmailVerificationToken'))) {
+                errorMsg += `\n\n🔴 FIX REQUIRED:
+- DO NOT import EmailVerificationToken (it's not in the contract)
+- Use User.verification_token field instead (as defined in contract)
+- Remove: from models.email_verification_token import EmailVerificationToken
+- Remove: from models.email_verification_token import EmailVerificationToken (if in controllers)`;
+            }
+            
+            if (err.missingModule && (err.missingModule.includes('email_service') || err.missingModule.includes('EmailService'))) {
+                errorMsg += `\n\n🔴 FIX REQUIRED:
+- DO NOT import EmailService (it's not in the contract)
+- Use Flask-Mail directly: from app import mail; mail.send()
+- Remove: from services.email_service import EmailService`;
+            }
+            
+            // Check for table already defined errors (any table name)
+            // Check both the flag and the error message pattern
+            if (err.isTableConflictError || 
+                (err.error && (err.error.includes("Table '") && err.error.includes("' is already defined")) ||
+                 err.error && err.error.includes("InvalidRequestError: Table") && err.error.includes("already defined"))) {
+                // Extract table name from error message or use the flag
+                const tableName = err.tableName || (err.error.match(/Table '(\w+)' is already defined/) ? err.error.match(/Table '(\w+)' is already defined/)[1] : 'unknown');
+                
+                errorMsg += `\n\n🔴 TABLE ALREADY DEFINED ERROR DETECTED:
+The table '${tableName}' is already defined in the database schema. This happens when multiple models try to use the same table name.
+
+THREE POSSIBLE FIXES:
+
+OPTION 1 - If it's a SHARED table (User, Product, Category, Order, etc.):
+- DO NOT create a new model with the same table name
+- FIX: Import the existing shared model instead
+- Example for 'orders' table:
+  * WRONG: from models.cancel_order_order import CancelOrderOrder
+  * CORRECT: from models.order import Order  (use the shared Order model)
+- Example for 'users' table:
+  * WRONG: from models.{functionality}_user import User
+  * CORRECT: from models.user import User
+- DO NOT generate shared model files again - they already exist
+
+OPTION 2 - If it's a FUNCTIONALITY-SPECIFIC table that needs to be unique:
+- FIX: Use a unique table name with functionality prefix
+- Example: Instead of __tablename__ = 'orders', use:
+  * __tablename__ = 'cancel_order_orders'  (or 'edit_order_orders', etc.)
+- This ensures each functionality has its own table
+
+OPTION 3 - If you MUST reuse an existing table (shared across functionalities):
+- FIX: Add __table_args__ = {'extend_existing': True} to the model class
+- Example:
+  class CancelOrderOrder(db.Model):
+      __tablename__ = 'orders'
+      __table_args__ = {'extend_existing': True}
+- This tells SQLAlchemy to extend the existing table definition instead of creating a new one
+
+MOST COMMON CASES:
+- "Table 'users' is already defined" → Use "from models.user import User" (shared model)
+- "Table 'products' is already defined" → Use "from models.product import Product" (shared model)
+- "Table 'orders' is already defined" → Either use shared Order model OR use unique table name like 'cancel_order_orders'
+- "Table 'categories' is already defined" → Use "from models.category import Category" (shared model)`;
+            }
+            
+            if (err.error && (err.error.includes('add_product_user') || err.error.includes('view_profile_user') || 
+                err.error.includes('user_registration_user') || err.error.includes('user_login_user'))) {
+                errorMsg += `\n\n🔴 FUNCTIONALITY-SPECIFIC USER MODEL DETECTED:
+- You are importing from a functionality-specific User model path (e.g., models.add_product_user)
+- This causes table collision errors because User is a shared model
+- FIX: Change to shared import: from models.user import User
+- Remove any functionality-specific User model files (models/{functionality}_user.py)
+- Use the shared models/user.py instead`;
+            }
+            
+            if (err.isBlueprintError || (err.error && err.error.includes('Blueprint.__init__() got multiple values for argument'))) {
+                errorMsg += `\n\n🔴 BLUEPRINT INITIALIZATION ERROR DETECTED:
+- Blueprint is being called with import_name twice
+- WRONG: Blueprint('name', __name__, import_name=__name__)  # import_name passed twice
+- CORRECT: Blueprint('name', __name__)  # __name__ is the import_name (second positional argument)
+- FIX: Remove the import_name=__name__ keyword argument from all Blueprint() calls
+- Search for: Blueprint(.*import_name=__name__) and remove the import_name=__name__ part`;
+            }
+            
+            // Check for circular import errors
+            if (err.isCircularImport || (err.error && (err.error.includes('circular import') || err.error.includes('partially initialized module')))) {
+                const fromModule = err.fromModule || 'unknown';
+                const missingName = err.missingName || 'unknown';
+                errorMsg += `\n\n🔴 CIRCULAR IMPORT ERROR DETECTED:
+A circular import occurs when module A imports from module B, and module B imports from module A.
+
+ERROR DETAILS:
+- Trying to import '${missingName}' from '${fromModule}'
+- This creates a circular dependency that Python cannot resolve
+
+COMMON CAUSES:
+1. Views importing from Controllers, and Controllers importing from Views
+2. Models importing from Controllers, and Controllers importing from Models
+3. Helper functions defined in wrong files
+
+FIX REQUIRED:
+OPTION 1 - Move shared functions to a separate module:
+- Create a new file: utils/helpers.py (or helpers.py in root)
+- Move the shared function (e.g., serialize_order) to this file
+- Import from the helper file in both views and controllers
+- Example:
+  # utils/helpers.py
+  def serialize_order(order):
+      # function code here
+  
+  # controllers/manager_interface_controller.py
+  from utils.helpers import serialize_order
+  
+  # views/manager_interface_views.py
+  from utils.helpers import serialize_order
+
+OPTION 2 - Use late imports (import inside functions):
+- Move the import statement inside the function that uses it
+- This delays the import until the function is called
+- Example:
+  def some_function():
+      from controllers.manager_interface_controller import serialize_order
+      # use serialize_order here
+
+OPTION 3 - Restructure to avoid circular dependency:
+- If views need controller functions, move those functions to a shared location
+- If controllers need view functions, consider if the logic should be in controllers instead
+- Follow MVC pattern: Controllers should not import from Views, Views should not import from Controllers
+
+MOST COMMON FIX:
+- Move serialize_order, serialize_table, or similar helper functions to a separate utils/helpers.py file
+- Import from utils/helpers in both places that need it`;
+            }
+            
+            // Check for syntax errors
+            if (err.isSyntaxError) {
+                const errorFile = err.errorFile || 'unknown';
+                const errorLine = err.errorLine || 'unknown';
+                const syntaxError = err.syntaxError || 'unknown';
+                errorMsg += `\n\n🔴 SYNTAX ERROR DETECTED:
+A syntax error means the Python code is malformed and cannot be parsed.
+
+ERROR DETAILS:
+- File: ${errorFile}
+- Line: ${errorLine}
+- Error: ${syntaxError}
+
+COMMON CAUSES:
+1. Missing newline between import statements (e.g., "import osfrom unittest" should be two lines)
+2. Missing closing parentheses, brackets, or quotes
+3. Incorrect indentation
+4. Missing colons after if/for/def statements
+
+FIX REQUIRED:
+- Check line ${errorLine} in ${errorFile}
+- Ensure all import statements are on separate lines
+- Example WRONG: import osfrom unittest.mock import patch
+- Example CORRECT:
+  import os
+  from unittest.mock import patch
+- Ensure proper spacing and newlines between statements
+- Check for missing punctuation (colons, commas, parentheses)
+- Verify indentation is correct (use 4 spaces, not tabs)
+
+SPECIFIC FIX FOR MISSING NEWLINE IN IMPORTS:
+- If you see "import Xfrom Y" or "import Ximport Y", split into separate lines:
+  import X
+  from Y import Z
+  import Y`;
+            }
+            
+            // Add specific guidance for SQLAlchemy DetachedInstanceError
+            if (err.isSQLAlchemyError && err.errorType === 'DetachedInstanceError') {
+                errorMsg += `\n\n🔴 SQLALCHEMY DETACHED INSTANCE ERROR DETECTED:
+This error occurs when you try to access model attributes (like user.id, category.id) outside the database session context.
+
+COMMON CAUSES:
+1. Accessing model attributes after app context ends
+2. Passing model objects between different app contexts
+3. Accessing attributes in test helpers (_login_via_session) that are outside app context
+
+FIX REQUIRED:
+- When creating model instances in tests, access their attributes (like .id) INSIDE the app context
+- Example FIX for _login_via_session helper:
+  def _login_via_session(client, user_id):
+      with client.session_transaction() as sess:
+          sess['user_id'] = user_id  # Use user_id directly, not user.id
+  
+- If you need to access user.id, do it INSIDE the app context:
+  with app.app_context():
+      user = _create_user()
+      user_id = user.id  # Get id while in context
+  # Then use user_id outside context
+  
+- For test helpers that create users/categories, ensure they return the ID or access attributes within the context
+- CRITICAL: Never access model.attribute outside app.app_context() or db.session context`;
+            }
+            
+            // Add specific guidance for FileNotFoundError
+            if (err.isFileSystemError && err.errorType === 'FileNotFoundError') {
+                errorMsg += `\n\n🔴 FILE NOT FOUND ERROR DETECTED:
+This error occurs when trying to save a file to a directory that doesn't exist.
+
+FIX REQUIRED:
+- Before saving files, ensure the directory exists using os.makedirs() or pathlib.Path.mkdir()
+- Example FIX for save_uploaded_picture:
+  import os
+  from pathlib import Path
+  
+  def save_uploaded_picture(file_storage):
+      # Create directory if it doesn't exist
+      upload_dir = Path('static/uploads/products')
+      upload_dir.mkdir(parents=True, exist_ok=True)  # Creates directory if missing
+      
+      # Then save the file
+      file_path = upload_dir / filename
+      file_storage.save(str(file_path))
+  
+- Always use os.makedirs(directory, exist_ok=True) or Path.mkdir(parents=True, exist_ok=True) before file operations
+- Check if directory exists before saving: if not os.path.exists(directory): os.makedirs(directory)`;
+            }
+            
+            // Add guidance for function logic errors (not raising exceptions)
+            if (err.isLogicError || (err.error && err.error.includes('DID NOT RAISE'))) {
+                errorMsg += `\n\n🔴 EXCEPTION NOT RAISED ERROR DETECTED:
+The test expects the function to raise an exception, but it didn't.
+
+FIX REQUIRED:
+- The function should validate input and raise appropriate exceptions (ValueError, TypeError, etc.) for invalid input
+- Example for login_required decorator:
+  def login_required(view_func):
+      @wraps(view_func)
+      def wrapper(*args, **kwargs):
+          user_id = session.get('user_id')
+          if not user_id:
+              raise UnauthorizedError("Login required")  # Or redirect, or raise exception
+          return view_func(*args, **kwargs)
+      return wrapper
+  
+- Example for save_uploaded_picture:
+  def save_uploaded_picture(file_storage):
+      if not file_storage or not file_storage.filename:
+          raise ValueError("Invalid file storage")  # Raise exception for invalid input
+      # ... rest of function
+  
+- Ensure functions validate input and raise exceptions when input is invalid or missing`;
+            }
+            
+            // Add guidance for LocalProxy issues (get_current_user returning proxy instead of None)
+            if (err.isLocalProxyError || (err.error && err.error.includes('LocalProxy') && err.error.includes('is None'))) {
+                errorMsg += `\n\n🔴 FLASK LOCALPROXY ERROR DETECTED:
+The function is returning a LocalProxy object instead of None or the actual value.
+
+FIX REQUIRED:
+- When checking if a value exists in Flask session, properly handle LocalProxy
+- Example FIX for get_current_user:
+  def get_current_user():
+      user_id = session.get('user_id')
+      if not user_id:
+          return None  # Return None, not a LocalProxy
+      return User.query.get(user_id)
+  
+- Always check if session values exist before using them
+- Use session.get('key') which returns None if key doesn't exist, not session['key'] which raises KeyError`;
+            }
+            
+            errorMsg += `\n${err.traceback.length > 0 ? `Traceback:\n${err.traceback.slice(0, 10).join('\n')}` : ''}
+`;
+            return errorMsg;
+        }).join('\n---\n\n');
+        
+        // Extract exact names from contract for strict enforcement
+        const routeInfo = contract.file_structure?.controllers?.flatMap(c => 
+            c.routes?.map(r => ({
+                path: r.path,
+                methods: r.methods,
+                function_name: r.function_name
+            })) || []
+        ) || [];
+        
+        const modelInfo = contract.file_structure?.models?.map(m => ({
+            class: m.class_name,
+            fields: m.fields?.map(f => f.name) || [],
+            methods: m.methods?.map(m => m.name) || []
+        })) || [];
+        
+        const helperFunctions = contract.file_structure?.controllers?.flatMap(c =>
+            c.helper_functions?.map(h => ({
+                name: h.name,
+                parameters: h.parameters
+            })) || []
+        ) || [];
+        
+        // Build contract section
+        const contractSection = `
+📋 API CONTRACT (MUST FOLLOW EXACTLY - NO VARIATIONS):
+${JSON.stringify(contract, null, 2)}
+
+CRITICAL REQUIREMENTS - EXACT NAMING ENFORCEMENT:
+
+1. ROUTE FUNCTION NAMES (MANDATORY - USE EXACT NAMES):
+${routeInfo.map(r => {
+    const methods = r.methods && Array.isArray(r.methods) ? r.methods.join(', ') : 'N/A';
+    return `   - Route "${r.path}" (${methods}) MUST use function name: "${r.function_name}"
+     * DO NOT split into ${r.function_name}_get() and ${r.function_name}_post()
+     * DO NOT use variations like ${r.function_name}_handler() or ${r.function_name}_route()
+     * USE EXACTLY: def ${r.function_name}():`;
+}).join('\n')}
+
+2. MODEL FIELD NAMES (MANDATORY - USE EXACT NAMES):
+${modelInfo.map(m => `   - Model "${m.class}" MUST use these EXACT field names:
+     ${m.fields.map(f => `* ${f}`).join('\n     ')}
+     * DO NOT use variations (e.g., if contract says "is_verified", DO NOT use "is_email_verified")
+     * DO NOT use variations (e.g., if contract says "verification_token", DO NOT use "email_verification_token_hash")
+     * DO NOT use variations (e.g., if contract says "profile_picture", DO NOT use "profile_picture_path")`).join('\n\n')}
+
+3. MODEL METHOD NAMES (MANDATORY - USE EXACT NAMES):
+${modelInfo.map(m => `   - Model "${m.class}" MUST use these EXACT method names:
+     ${m.methods.map(f => `* ${f}()`).join('\n     ')}
+     * DO NOT create methods not in this list
+     * DO NOT use variations of these names`).join('\n\n')}
+
+4. HELPER FUNCTION NAMES (MANDATORY - USE EXACT NAMES):
+${helperFunctions.map(h => {
+    const params = h.parameters && Array.isArray(h.parameters) ? h.parameters.join(', ') : 'N/A';
+    return `   - Helper function: "${h.name}(${params})"
+     * DO NOT use variations
+     * DO NOT create helper functions not in this list`;
+}).join('\n')}
+
+CRITICAL - STRICT ADHERENCE:
+- Use EXACT function names from contract.file_structure.controllers[].routes[].function_name
+- Use EXACT field names from contract.file_structure.models[].fields[].name
+- Use EXACT method names from contract.file_structure.models[].methods[].name
+- Use EXACT helper function names from contract.file_structure.controllers[].helper_functions[].name
+- DO NOT create variations, abbreviations, or alternative names
+- DO NOT split single functions into multiple (e.g., register_get/register_post when contract says register)
+- DO NOT add prefixes/suffixes (e.g., _handler, _route, _path, _hash, _get, _post)
+- Implement ALL routes, fields, methods, and helper functions defined in the contract
+- DO NOT create additional models, controllers, services, or imports that are NOT in the contract
+- DO NOT import models that are not listed in contract.file_structure.models
+- Use ONLY the exact import paths specified in contract.import_paths
+`;
+        
+        // Build SRS context from packet
+        let srsContext = '';
+        if (packet) {
+            srsContext = `
+FUNCTIONALITY: ${packet.name || contract.functionality || 'unknown'}
+DESCRIPTION: ${packet.description || 'N/A'}
+USE CASES: ${packet.useCases?.join(', ') || 'N/A'}
+REQUIREMENTS: ${packet.requirements?.join(', ') || 'N/A'}
+ACTIVITY DIAGRAMS: ${packet.activityDiagrams?.join(', ') || 'N/A'}
+DEPENDENCIES: ${packet.dependencies?.join(', ') || 'N/A'}
+CONTEXT: ${packet.context || 'N/A'}
+`;
+        }
+        
+        // Calculate hash of current code to detect if LLM returns same code
+        const crypto = require('crypto');
+        const currentCodeHash = crypto.createHash('md5').update(currentCode).digest('hex');
+        console.log(`🔐 [FEEDBACK] Current code hash (MD5): ${currentCodeHash.substring(0, 16)}...`);
+        
+        const prompt = `You are a ${language.toUpperCase()} developer. Fix the following code to make all tests pass while strictly following the contract and SRS requirements.
+
+${srsContext}
+
+${contractSection}
+
+REQUIREMENTS:
+- Fix the existing ${language.toUpperCase()} code to make ALL tests pass
+- Maintain the same MVC structure and file organization
+- Use proper MVC architecture
+- Include complete, executable code for ALL files
+
+CURRENT CODE (WITH ERRORS - THIS CODE FAILS TESTS):
+\`\`\`${language}
+${currentCode}
+\`\`\`
+
+TEST FAILURES (THESE ERRORS MUST BE FIXED):
+${errorSummary}
+
+YOUR TASK:
+1. Analyze the test failures and identify what's wrong with the current code
+2. Fix the code to make ALL tests pass
+3. Ensure the fixed code strictly follows the contract (file paths, class names, function names, import paths)
+4. Ensure the fixed code matches the SRS requirements
+5. DO NOT create models, services, or imports that are NOT in the contract
+6. DO NOT change the contract structure - only fix implementation bugs
+7. DO NOT return incomplete code - you MUST return ALL files with file markers
+
+MVC STRUCTURE - Fix ALL these core components:
+
+1. MODEL LAYER - Fix data entities:
+   - Primary entity for this functionality (models/filename.py)
+   - Business logic and validation methods
+   - Database schema definitions
+
+2. VIEW LAYER - Fix UI components:
+   - User interface components (views/filename.py)
+   - Template files (templates/filename.html)
+   - User interaction handlers
+
+3. CONTROLLER LAYER - Fix business logic:
+   - API endpoints and routes (controllers/filename.py)
+   - Business operations and coordination
+   - Request/response handling
+
+4. MAIN APP FILE:
+   - Application initialization (app.py)
+   - Configuration and setup
+
+ONLY fix these core MVC files (DO NOT add new files):
+- models/filename.py
+- views/filename.py  
+- controllers/filename.py
+- templates/filename.html
+- app.py (main application file in root - MUST include Flask-SQLAlchemy db initialization)
+
+CRITICAL REQUIREMENT - FLASK-SQLALCHEMY SETUP:
+For Flask applications with SQLAlchemy models, you MUST use Flask-SQLAlchemy (NOT raw SQLAlchemy):
+
+1. In app.py, ALWAYS follow this EXACT order to avoid circular imports:
+   from flask import Flask
+   from flask_sqlalchemy import SQLAlchemy
+   from flask_mail import Mail
+   
+   app = Flask(__name__)
+   app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app.db'
+   app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+   app.config['SECRET_KEY'] = 'your-secret-key'
+   # ... other config ...
+   
+   # CRITICAL: Initialize db and mail BEFORE importing controllers
+   db = SQLAlchemy(app)
+   mail = Mail(app)
+   
+   # CRITICAL: Import blueprints AFTER db and mail are initialized (prevents circular imports)
+   from controllers.user_controller import user_bp
+   # ... other blueprint imports ...
+   
+   # Register blueprints
+   app.register_blueprint(user_bp)
+   # ... other blueprint registrations ...
+   
+   IMPORTANT: The order MUST be:
+   1. Import Flask, SQLAlchemy, Mail
+   2. Create app
+   3. Configure app
+   4. Initialize db = SQLAlchemy(app)
+   5. Initialize mail = Mail(app)
+   6. THEN import blueprints (controllers can now safely import db from app)
+   7. Register blueprints
+
+2. In models/*.py files, ALWAYS use:
+   from app import db
+   
+   class ModelName(db.Model):
+       __tablename__ = 'table_name'
+       # columns here
+
+3. In controllers/*.py files, ALWAYS use:
+   from flask import Blueprint
+   from app import db
+   
+   # CRITICAL - BLUEPRINT INITIALIZATION (MANDATORY):
+   - Blueprint constructor: Blueprint(name, import_name, ...)
+   - The second argument (import_name) is ALWAYS __name__
+   - CORRECT: user_bp = Blueprint('user', __name__)
+   - WRONG: Blueprint('user', __name__, import_name=__name__)  # This causes TypeError: got multiple values for argument 'import_name'
+   - DO NOT pass import_name as a keyword argument when __name__ is already passed as the second positional argument
+   - Example: user_registration_bp = Blueprint('user_registration', __name__)  # CORRECT
+   
+   # CRITICAL: ONLY import models that are defined in the contract
+   # The contract defines these models: ${contract.file_structure?.models?.map(m => m.class_name).join(', ') || 'NONE'}
+   # Example: from models.user import User (ONLY if User is in contract.file_structure.models)
+   # DO NOT import models that are not in the contract
+   # DO NOT import EmailVerificationToken, EmailService, or any other models/services not in the contract
+   # If verification tokens are needed, use User.verification_token field (as defined in contract)
+   
+   # CRITICAL: Use EXACT function names from contract - DO NOT split into _get/_post variants
+   # If contract says "register", use single function "register" that handles both GET and POST
+   # If contract says "verify_email", use "verify_email" (NOT verify_email_get)
+   # If contract says "login", use "login" (NOT login_get/login_post)
+   
+   # Then use: db.session.add(), db.session.commit(), db.session.query()
+
+4. DO NOT use raw SQLAlchemy (declarative_base, init_db, sessionmaker)
+5. DO NOT create config/database.py with Base = declarative_base()
+6. Flask-SQLAlchemy's db object provides: db.Model, db.session, db.create_all(), db.drop_all()
+
+This ensures compatibility with Flask test clients and pytest fixtures that expect Flask-SQLAlchemy.
+
+FRAMEWORK-SPECIFIC MVC STRUCTURE:
+
+PYTHON/FLASK:
+- models/ folder with separate model files (ONLY the models defined in contract.file_structure.models)
+- views/ folder with view classes (user_views.py, product_views.py)
+- controllers/ folder with controller classes (ONLY the controllers defined in contract.file_structure.controllers)
+- templates/ folder with HTML templates (ONLY the templates defined in contract.file_structure.templates)
+- app.py in root directory (main application file)
+
+CRITICAL - ONLY FIX WHAT'S IN THE CONTRACT (STRICT ENFORCEMENT):
+- Fix ONLY the models listed in contract.file_structure.models
+- Fix ONLY the controllers listed in contract.file_structure.controllers
+- Fix ONLY the routes listed in contract.file_structure.controllers[].routes
+- Fix ONLY the templates listed in contract.file_structure.templates
+- Fix ONLY the helper functions listed in contract.file_structure.controllers[].helper_functions
+- DO NOT create additional models, controllers, services, or files that are not in the contract
+- DO NOT import models that are not in contract.file_structure.models
+- DO NOT create services/ folder or EmailService classes
+- DO NOT create EmailVerificationToken or any other models not in the contract
+- If email verification is needed, use User.verification_token field (as defined in contract), NOT a separate model
+- Use Flask-Mail directly (from app import mail; mail.send()) instead of creating EmailService
+
+CRITICAL - EXACT FILE GENERATION (MANDATORY - APPLIES TO ALL FILE TYPES):
+- Fix EXACTLY the files listed in contract.file_structure (models, controllers, views, templates)
+- DO NOT create additional files beyond what's in the contract
+- DO NOT split one file into multiple files
+- DO NOT create variations, abbreviations, or alternative file names
+- File names MUST match contract.file_structure EXACTLY (case-sensitive, character-by-character)
+
+CRITICAL - FUNCTIONALITY-BASED NAMING (MANDATORY):
+- ALL file names MUST be prefixed with the functionality name (in snake_case)
+- The contract already includes functionality-prefixed names - use them EXACTLY as specified
+- Models: Use format from contract (e.g., "models/product_search_product.py", NOT "models/product.py")
+- Controllers: Use format from contract (e.g., "controllers/product_search_controller.py", NOT "controllers/product_controller.py")
+- Views: Use format from contract (e.g., "views/product_search_views.py", NOT "views/product_views.py")
+- Templates: Use format from contract (e.g., "templates/product_search_search.html", NOT "templates/search.html")
+- DO NOT use generic names without functionality prefix
+- DO NOT create files like "category.py", "product.py" - use "product_search_category.py", "product_search_product.py" instead
+
+STRICT FILE COUNT AND NAMING (ALL FILE TYPES):
+- Models: Fix ONLY the models in contract.file_structure.models
+  * If contract lists 2 models, fix EXACTLY 2 models (not 1, not 3)
+  * If contract says "models/product.py", fix EXACTLY "models/product.py" - NOT "models/products.py"
+  * If contract says "models/category.py" AND "models/product.py", fix BOTH - but if contract only lists one, fix ONLY that one
+  
+- Controllers: Fix ONLY the controllers in contract.file_structure.controllers
+  * If contract lists 1 controller, fix EXACTLY 1 controller (not 2, not 0)
+  * If contract says "controllers/product_search_controller.py", fix EXACTLY that - NOT "controllers/product_controller.py"
+  * DO NOT split one controller into multiple files (e.g., product_search_controller.py AND category_controller.py)
+  
+- Views: Fix ONLY the views in contract.file_structure.views
+  * If contract lists 1 view, fix EXACTLY 1 view (not 2, not 0)
+  * File names must match contract EXACTLY
+  
+- Templates: Fix ONLY the templates in contract.file_structure.templates
+  * If contract lists 2 templates, fix EXACTLY 2 templates (not 1, not 3)
+  * File names must match contract EXACTLY
+
+GENERAL RULE:
+- Count of files MUST match contract (if contract has 2 models, fix 2 models - not 1, not 3)
+- File paths MUST match contract EXACTLY (character-by-character, case-sensitive)
+- DO NOT add, remove, or modify file names from what's in the contract
+
+CRITICAL - EXACT NAMING ENFORCEMENT (MANDATORY):
+- Use EXACT function names from contract.file_structure.controllers[].routes[].function_name
+  * If contract says "register", use "register" (NOT register_get/register_post)
+  * If contract says "verify_email", use "verify_email" (NOT verify_email_get)
+  * If contract says "login", use "login" (NOT login_get/login_post)
+- Use EXACT field names from contract.file_structure.models[].fields[].name
+  * If contract says "is_verified", use "is_verified" (NOT is_email_verified)
+  * If contract says "verification_token", use "verification_token" (NOT email_verification_token_hash)
+  * If contract says "profile_picture", use "profile_picture" (NOT profile_picture_path)
+- Use EXACT method names from contract.file_structure.models[].methods[].name
+  * If contract says "generate_verification_token", use "generate_verification_token" (NOT set_email_verification_token)
+- Use EXACT helper function names from contract.file_structure.controllers[].helper_functions[].name
+  * If contract says "validate_registration_data", use "validate_registration_data" (NOT validate_registration_payload)
+- DO NOT create variations, abbreviations, or alternative names
+- DO NOT split single functions into multiple (e.g., register_get/register_post when contract says register)
+- DO NOT add prefixes/suffixes (e.g., _handler, _route, _path, _hash, _get, _post)
+
+COMMON ERROR FIXES:
+- If you see "ModuleNotFoundError: No module named 'models.email_verification_token'":
+  * REMOVE: from models.email_verification_token import EmailVerificationToken
+  * USE INSTEAD: User.verification_token field (as defined in contract)
+  * DO NOT create EmailVerificationToken model - it's NOT in the contract
+  
+- If you see "ModuleNotFoundError: No module named 'services.email_service'":
+  * REMOVE: from services.email_service import EmailService
+  * USE INSTEAD: from app import mail; mail.send(Message(...))
+  * DO NOT create EmailService class - it's NOT in the contract
+
+- If you see "Table 'X' is already defined" or "InvalidRequestError: Table 'X' is already defined":
+  * This means a table with that name already exists in the database schema
+  * TWO POSSIBLE FIXES depending on the situation:
+  
+  OPTION 1 - If it's a SHARED table (User, Product, Category, Order, etc.):
+  * DO NOT create a new model with the same table name
+  * FIX: Import the existing shared model instead
+  * Example: If "Table 'orders' is already defined", change:
+  *   from models.cancel_order_order import CancelOrderOrder
+  *   to: from models.order import Order  (or whatever the shared model is)
+  * DO NOT generate shared model files again - they already exist
+  
+  OPTION 2 - If it's a FUNCTIONALITY-SPECIFIC table that needs to be unique:
+  * FIX: Use a unique table name with functionality prefix
+  * Example: Instead of __tablename__ = 'orders', use:
+  *   __tablename__ = 'cancel_order_orders'  (or 'edit_order_orders', etc.)
+  * This ensures each functionality has its own table
+  
+  OPTION 3 - If you MUST reuse an existing table (shared across functionalities):
+  * FIX: Add __table_args__ = {'extend_existing': True} to the model class
+  * Example:
+  *   class CancelOrderOrder(db.Model):
+  *       __tablename__ = 'orders'
+  *       __table_args__ = {'extend_existing': True}
+  * This tells SQLAlchemy to extend the existing table definition instead of creating a new one
+  
+  MOST COMMON CASES:
+  * "Table 'users' is already defined" → Use "from models.user import User" (shared model)
+  * "Table 'products' is already defined" → Use "from models.product import Product" (shared model)
+  * "Table 'orders' is already defined" → Either use shared Order model OR use unique table name like 'cancel_order_orders'
+  * "Table 'categories' is already defined" → Use "from models.category import Category" (shared model)
+
+- If you see "TypeError: Blueprint.__init__() got multiple values for argument 'import_name'":
+  * WRONG: Blueprint('name', __name__, import_name=__name__)
+  * CORRECT: Blueprint('name', __name__)
+  * FIX: Remove the import_name=__name__ keyword argument
+
+- If you see "DetachedInstanceError":
+  * This means accessing model attributes outside database session
+  * FIX: Ensure all database operations are within app.app_context() or db.session context
+  * Use: with app.app_context(): ... before accessing model attributes
+
+- If you see "FileNotFoundError":
+  * This means trying to save files to non-existent directories
+  * FIX: Use os.makedirs(directory, exist_ok=True) before saving files
+
+- If you see "DID NOT RAISE" errors:
+  * This means functions are not raising expected exceptions for invalid input
+  * FIX: Add proper validation and raise exceptions (TypeError, ValueError) for invalid input
+
+- If you see "LocalProxy" issues with get_current_user:
+  * This means get_current_user returns LocalProxy instead of None
+  * FIX: Check if user_id exists in session before accessing, return None explicitly if not found
+
+CRITICAL MVC REQUIREMENTS:
+- DO NOT generate monolithic code in a single file
+- Fix separate files for each MVC component
+- Maintain proper directory structure (models/, views/, controllers/)
+- Each file should have a single responsibility
+- Use proper imports and dependencies for each file
+
+FILE SEPARATION REQUIREMENTS:
+- models/ folder: One file per entity (user.py, product.py)
+- views/ folder: One file per view class (user_views.py, product_views.py)
+- controllers/ folder: One file per controller (user_controller.py, product_controller.py)
+- templates/ folder: HTML template files
+- Main app file: app.py (minimal, just imports and configuration)
+
+OUTPUT FORMAT:
+Use this format for each file:
+#### filename.ext
+[code here]
+
+#### filename2.ext
+[code here]
+
+CRITICAL - FILE PATH ENFORCEMENT (MANDATORY):
+- You MUST use ONLY file paths from the contract.file_structure
+- ALLOWED paths: models/, controllers/, views/, templates/, app.py, config/
+- FORBIDDEN paths: forms/, services/, utils/, helpers/, lib/, src/, components/, api/, routes/, middleware/, etc.
+- DO NOT create files in folders NOT listed in the contract
+- DO NOT use paths like "forms/product_form.py" - use "models/product.py" or "controllers/product_controller.py" instead
+- If contract says "models/user.py", use EXACTLY "models/user.py" - NOT "models/users.py" or "model/user.py"
+- If contract says "controllers/user_controller.py", use EXACTLY "controllers/user_controller.py"
+- Templates MUST be in templates/ folder: "templates/register.html" - NOT "views/register.html" or "register.html"
+- Example CORRECT paths:
+  * #### models/user.py
+  * #### controllers/user_controller.py
+  * #### views/user_views.py
+  * #### templates/register.html
+  * #### app.py
+- Example WRONG paths (DO NOT USE):
+  * #### forms/user_form.py (WRONG - use models/user.py)
+  * #### services/user_service.py (WRONG - use controllers/user_controller.py)
+  * #### utils/helpers.py (WRONG - not in contract)
+
+CRITICAL - YOU MUST RETURN THE COMPLETE MVC STRUCTURE:
+- The current code is a multi-file MVC structure with file markers (#### filename.ext)
+- You MUST return ALL files in the same format with file markers
+- DO NOT return only app.py or a single file
+- DO NOT return incomplete code
+- You MUST include ALL files: models, controllers, views, templates, app.py
+- Each file MUST be wrapped with: #### filename.ext\n[code]\n
+- Example format:
+  #### models/user.py
+  [user model code]
+  
+  #### controllers/view_profile_controller.py
+  [controller code]
+  
+  #### views/view_profile_views.py
+  [views code]
+  
+  #### app.py
+  [app.py code]
+
+CRITICAL - YOU MUST MAKE ACTUAL CHANGES:
+- The current code has test failures - it is NOT correct
+- You MUST modify the code to fix the errors listed above
+- DO NOT return the same code - it will fail the same tests
+- DO NOT return code that is identical to the current code
+- You MUST make concrete changes to fix each error
+- If you return identical code, the tests will still fail AND the system will reject it
+- Review each error carefully and make the necessary fixes
+- The code MUST be different from the current code to pass tests
+- BUT you MUST return the COMPLETE structure, not just one file
+- MANDATORY: Your output code MUST be different from the input code - identical code will be rejected
+
+CRITICAL - DO NOT BREAK WORKING CODE:
+- ONLY fix the specific errors listed in the test failures
+- DO NOT modify code that is not related to the errors
+- DO NOT introduce new errors while fixing existing ones
+- DO NOT create circular imports (views importing from controllers that import from views)
+- DO NOT merge import statements (keep each import on a separate line)
+- DO NOT modify shared code (app.py, shared models) unless the error specifically requires it
+- If fixing one functionality breaks another, you've made a mistake - revert that change
+- Test your fixes mentally: if you add an import, make sure it doesn't create a circular dependency
+- If you see "circular import" errors, move shared functions to a separate utils/helpers.py file
+
+CODE LENGTH REQUIREMENTS (CRITICAL TO PREVENT TRUNCATION):
+- Current code length: ${currentCode.length} characters
+- Keep your output code concise but complete
+- Target length: Similar to input (${currentCode.length} chars) or up to ${Math.min(currentCode.length * 1.2, 50000).toFixed(0)} chars maximum
+- DO NOT exceed ~50,000 characters total to avoid response truncation
+- If code is too long, prioritize fixing errors over adding unnecessary code
+- Keep functions focused and avoid excessive comments or verbose implementations
+- Estimate: Aim for ${Math.floor(currentCode.length / 80)} to ${Math.floor(Math.min(currentCode.length * 1.2, 50000) / 80)} total lines across all files
+- If you need to add code, keep additions minimal and focused on fixing the specific errors
+
+Fix the complete ${language.toUpperCase()} code for this functionality. Return ONLY code files with #### filename format. Do not include any explanations, descriptions, or additional text after the code.`;
+
+        const axios = require('axios');
+        
+        // Use gpt-5.2 for feedback loop (same as code generation and test generation)
+        const model = 'gpt-5.2';
+        console.log(`🤖 [FEEDBACK] Using model: ${model}`);
+        
+        try {
+            const response = await axios.post(
+                'https://api.openai.com/v1/chat/completions',
+                {
+                    model: model,
+                    messages: [
+                        {
+                            role: 'system',
+                            content: `You are a ${language.toUpperCase()} developer. Fix code to make tests pass while following the contract exactly. Return ONLY executable code, no explanations. CRITICAL: You MUST modify the code - returning identical code is not acceptable and will be rejected. The code has test failures that MUST be fixed.`
+                        },
+                        {
+                            role: 'user',
+                            content: prompt
+                        }
+                    ],
+                    temperature: 0.3,
+                    max_completion_tokens: 16000  // GPT-5.2 requires max_completion_tokens instead of max_tokens
+                },
+                {
+                    headers: {
+                        'Authorization': `Bearer ${apiKey}`,
+                        'Content-Type': 'application/json'
+                    }
+                }
+            );
+            
+            // Log API response details
+            console.log(`📡 [FEEDBACK] API Response received`);
+            console.log(`📡 [FEEDBACK] Response status: ${response.status}`);
+            const finishReason = response.data.choices[0]?.finish_reason || 'N/A';
+            console.log(`📡 [FEEDBACK] Finish reason: ${finishReason}`);
+            console.log(`📡 [FEEDBACK] Usage tokens: ${JSON.stringify(response.data.usage || {})}`);
+            
+            // CRITICAL: Check if response was truncated
+            if (finishReason === 'length' || finishReason === 'max_tokens') {
+                console.error(`❌ [FEEDBACK] CRITICAL ERROR: Response was TRUNCATED due to token limit!`);
+                console.error(`❌ [FEEDBACK] Finish reason: ${finishReason}`);
+                console.error(`❌ [FEEDBACK] Token usage: ${JSON.stringify(response.data.usage || {})}`);
+                console.error(`❌ [FEEDBACK] The LLM response was cut off, meaning the code is incomplete.`);
+                console.error(`❌ [FEEDBACK] This will cause parsing errors or missing files.`);
+                throw new Error(`LLM response was truncated due to token limit (finish_reason: ${finishReason}). The generated code is incomplete. Consider reducing code length or increasing max_completion_tokens. Current limit: 16000 tokens.`);
+            }
+            
+            // Check if response is empty
+            if (!response.data.choices || response.data.choices.length === 0) {
+                console.error(`❌ [FEEDBACK] CRITICAL ERROR: Empty response from LLM!`);
+                throw new Error('LLM returned empty response. No code was generated.');
+            }
+            
+            if (!response.data.choices[0].message || !response.data.choices[0].message.content) {
+                console.error(`❌ [FEEDBACK] CRITICAL ERROR: Response has no content!`);
+                console.error(`❌ [FEEDBACK] Response data: ${JSON.stringify(response.data, null, 2)}`);
+                throw new Error('LLM response has no content. The message content is missing.');
+            }
+            
+            let fixedCode = response.data.choices[0].message.content.trim();
+            const rawResponseLength = fixedCode.length;
+            console.log(`📡 [FEEDBACK] Raw LLM response length: ${rawResponseLength} chars`);
+            console.log(`📡 [FEEDBACK] Raw LLM response preview (first 300 chars): ${fixedCode.substring(0, 300)}...`);
+            
+            // Compare with input code BEFORE cleaning
+            const inputCodeLength = currentCode.length;
+            const inputCodePreview = currentCode.substring(0, 300);
+            console.log(`📊 [FEEDBACK] INPUT code length: ${inputCodeLength} chars`);
+            console.log(`📊 [FEEDBACK] INPUT code preview (first 300 chars): ${inputCodePreview}...`);
+            console.log(`📊 [FEEDBACK] OUTPUT code length: ${rawResponseLength} chars`);
+            console.log(`📊 [FEEDBACK] OUTPUT code preview (first 300 chars): ${fixedCode.substring(0, 300)}...`);
+            
+            // Check if raw response is identical to input
+            if (fixedCode === currentCode) {
+                console.error(`❌ [FEEDBACK] CRITICAL: LLM returned IDENTICAL code to input!`);
+                console.error(`❌ [FEEDBACK] This means the LLM did not make any changes.`);
+                console.error(`❌ [FEEDBACK] Rejecting identical code - it will not fix the test failures.`);
+                throw new Error('LLM returned identical code to input. The code must be modified to fix test failures. Identical code will fail the same tests and is not acceptable.');
+            } else {
+                console.log(`✅ [FEEDBACK] LLM returned DIFFERENT code (input: ${inputCodeLength} chars, output: ${rawResponseLength} chars)`);
+            }
+            
+            // Clean up the response (remove markdown code blocks if present)
+            if (fixedCode.includes('```')) {
+                const beforeClean = fixedCode.length;
+                fixedCode = fixedCode.replace(/```[a-zA-Z]*\n?/g, '');
+                fixedCode = fixedCode.replace(/```\s*$/g, '');
+                fixedCode = fixedCode.replace(/```/g, '');
+                console.log(`🧹 [FEEDBACK] Removed markdown code blocks (${beforeClean} → ${fixedCode.length} chars)`);
+            }
+            
+            // Remove explanatory text
+            const lines = fixedCode.split('\n');
+            let firstCodeLine = 0;
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (line && !line.startsWith('Note:') && !line.startsWith('Here') && 
+                    !line.startsWith('The') && !line.startsWith('This') &&
+                    (line.startsWith('import ') || line.startsWith('from ') || 
+                     line.startsWith('class ') || line.startsWith('def ') ||
+                     line.startsWith('const ') || line.startsWith('function ') ||
+                     line.startsWith('public ') || line.startsWith('private '))) {
+                    firstCodeLine = i;
+                    break;
+                }
+            }
+            const beforeSlice = fixedCode.length;
+            fixedCode = lines.slice(firstCodeLine).join('\n').trim();
+            if (beforeSlice !== fixedCode.length) {
+                console.log(`🧹 [FEEDBACK] Removed explanatory text (${beforeSlice} → ${fixedCode.length} chars, removed ${beforeSlice - fixedCode.length} chars)`);
+            }
+            
+            // CRITICAL VALIDATION: Check for file markers (MVC structure)
+            const hasFileMarkers = fixedCode.includes('#### ') && fixedCode.includes('.py');
+            const fileMarkerCount = (fixedCode.match(/#### /g) || []).length;
+            
+            console.log(`🔍 [FEEDBACK] File marker validation:`, {
+                hasFileMarkers,
+                fileMarkerCount,
+                expectedMinFiles: 3 // At least models, controllers, app.py
+            });
+            
+            if (!hasFileMarkers || fileMarkerCount < 3) {
+                console.error(`❌ [FEEDBACK] CRITICAL ERROR: Fixed code is missing file markers!`);
+                console.error(`❌ [FEEDBACK] File markers found: ${fileMarkerCount} (expected at least 3)`);
+                console.error(`❌ [FEEDBACK] The LLM returned code without the #### filename.ext format!`);
+                console.error(`❌ [FEEDBACK] This means it returned incomplete code or only one file.`);
+                console.error(`❌ [FEEDBACK] Code preview (first 500 chars): ${fixedCode.substring(0, 500)}...`);
+                throw new Error(`LLM returned incomplete code without file markers. Expected multi-file MVC structure with #### filename.ext format, but got single file or incomplete code. File markers found: ${fileMarkerCount}, expected at least 3.`);
+            }
+            
+            // Validate fixed code length - check if significantly shorter than input
+            const lengthRatio = fixedCode.length / currentCode.length;
+            if (lengthRatio < 0.3) {
+                console.error(`❌ [FEEDBACK] CRITICAL ERROR: Fixed code is too short!`);
+                console.error(`❌ [FEEDBACK] Input: ${currentCode.length} chars, Output: ${fixedCode.length} chars`);
+                console.error(`❌ [FEEDBACK] Ratio: ${(lengthRatio * 100).toFixed(1)}% (expected at least 70%)`);
+                console.error(`❌ [FEEDBACK] The LLM likely returned incomplete code or only one file.`);
+                throw new Error(`LLM returned incomplete code. Input was ${currentCode.length} chars but output is only ${fixedCode.length} chars (${(lengthRatio * 100).toFixed(1)}%). Expected complete MVC structure with all files.`);
+            }
+            
+            // Validate fixed code
+            if (!fixedCode || fixedCode.length < 100) {
+                console.warn(`⚠️ [FEEDBACK] WARNING: Fixed code seems too short (${fixedCode.length} chars). May be incomplete.`);
+            }
+            
+            // Final comparison with input using hash
+            const fixedCodeHash = crypto.createHash('md5').update(fixedCode).digest('hex');
+            const finalComparison = fixedCode === currentCode;
+            const hashComparison = fixedCodeHash === currentCodeHash;
+            
+            console.log(`🔐 [FEEDBACK] Fixed code hash (MD5): ${fixedCodeHash.substring(0, 16)}...`);
+            console.log(`🔐 [FEEDBACK] Hash comparison: ${hashComparison ? 'IDENTICAL' : 'DIFFERENT'}`);
+            
+            if (finalComparison || hashComparison) {
+                console.error(`❌ [FEEDBACK] CRITICAL ERROR: Final cleaned code is IDENTICAL to input code!`);
+                console.error(`❌ [FEEDBACK] Input length: ${currentCode.length}, Output length: ${fixedCode.length}`);
+                console.error(`❌ [FEEDBACK] Input hash: ${currentCodeHash.substring(0, 16)}...`);
+                console.error(`❌ [FEEDBACK] Output hash: ${fixedCodeHash.substring(0, 16)}...`);
+                console.error(`❌ [FEEDBACK] The LLM did not make any changes to fix the code.`);
+                console.error(`❌ [FEEDBACK] This will cause the same test failures.`);
+                console.error(`❌ [FEEDBACK] The LLM may not understand the errors or may think the code is already correct.`);
+                console.error(`❌ [FEEDBACK] Rejecting identical code - it must be modified to fix test failures.`);
+                throw new Error('LLM returned identical code after cleaning. The code must be modified to fix test failures. Identical code will fail the same tests and is not acceptable. The LLM needs to make actual changes to address the errors listed in the test failures.');
+            } else {
+                console.log(`✅ [FEEDBACK] Final code is DIFFERENT from input`);
+                console.log(`📊 [FEEDBACK] Input: ${currentCode.length} chars, Output: ${fixedCode.length} chars`);
+                console.log(`📊 [FEEDBACK] Difference: ${Math.abs(fixedCode.length - currentCode.length)} chars`);
+            }
+            
+            console.log(`✅ [FEEDBACK] Code fixed successfully (${fixedCode.length} chars)`);
+            console.log(`📊 [FEEDBACK] Fixed code preview (first 200 chars): ${fixedCode.substring(0, 200)}...`);
+            
+            // Log file markers for debugging
+            const fileMarkers = fixedCode.match(/####\s+[\w\/\.]+/g) || [];
+            console.log(`📁 [FEEDBACK] Files in fixed code: ${fileMarkers.length}`);
+            if (fileMarkers.length > 0) {
+                console.log(`📁 [FEEDBACK] File list: ${fileMarkers.map(m => m.replace('####', '').trim()).join(', ')}`);
+            }
+            
+            // Additional validation: Check if fixed code contains key elements
+            const hasRoutes = fixedCode.includes('@') && (fixedCode.includes('route') || fixedCode.includes('Blueprint'));
+            const hasFunctions = fixedCode.includes('def ') || fixedCode.includes('function ');
+            const hasImports = fixedCode.includes('import ') || fixedCode.includes('from ');
+            
+            console.log(`🔍 [FEEDBACK] Code validation:`, {
+                hasRoutes,
+                hasFunctions,
+                hasImports,
+                length: fixedCode.length
+            });
+            
+            if (!hasRoutes && !hasFunctions) {
+                console.warn(`⚠️ [FEEDBACK] WARNING: Fixed code may be incomplete - missing routes/functions!`);
+            }
+            
+            return fixedCode;
+            
+        } catch (error) {
+            console.error('❌ [FEEDBACK] Error fixing code:', error.message);
+            if (error.response) {
+                console.error('❌ [FEEDBACK] API Error:', JSON.stringify(error.response.data, null, 2));
+            }
+            throw new Error(`Failed to fix code: ${error.message}`);
         }
     }
 

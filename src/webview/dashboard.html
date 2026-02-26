@@ -283,6 +283,12 @@
                         case 'codeGenerated':
                             this.handleCodeGenerated(message.code, message.model);
                             break;
+                        case 'testGenerated':
+                            // TDD Mode: Tests generated first
+                            this.generatedTests = true; // Mark that tests exist
+                            this.updateButtons();
+                            this.updateStatus(message.message || 'Test cases generated successfully! (TDD Mode: Now generate code)', 'success');
+                            break;
                         case 'testsGenerated':
                             this.handleTestsGenerated(message.tests);
                             break;
@@ -392,16 +398,16 @@
             }
 
             generateTests() {
-                if (!this.generatedCode) {
-                    this.showError('Please generate code first');
+                if (!this.selectedFunctionality) {
+                    this.showError('Please select a functionality first');
                     return;
                 }
                 
+                console.log('🌐 [TESTS] TDD Mode: Generating tests FIRST based on SRS');
                 console.log('🌐 [TESTS] Selected language:', this.selectedLanguage);
-                this.updateStatus(`Generating ${this.selectedLanguage} test cases with AI...`, 'info');
+                this.updateStatus(`Generating ${this.selectedLanguage} test cases with AI (TDD Mode)...`, 'info');
                 this.sendMessage({
                     type: 'generateTests',
-                    code: this.generatedCode,
                     functionality: this.selectedFunctionality,
                     language: this.selectedLanguage
                 });
@@ -728,8 +734,11 @@
                 const generateTestsBtn = document.getElementById('generateTestsBtn');
                 const verifyCodeBtn = document.getElementById('verifyCodeBtn');
 
-                generateCodeBtn.disabled = !this.selectedFunctionality;
-                generateTestsBtn.disabled = !this.generatedCode;
+                // TDD Mode: Generate Tests first (enabled when functionality selected)
+                generateTestsBtn.disabled = !this.selectedFunctionality;
+                // Generate Code enabled after tests are generated
+                generateCodeBtn.disabled = !this.selectedFunctionality || !this.generatedTests;
+                // Verify/Run Tests enabled after code is generated
                 verifyCodeBtn.disabled = !this.generatedCode;
             }
 

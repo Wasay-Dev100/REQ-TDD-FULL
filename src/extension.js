@@ -6,40 +6,60 @@ const { TestGenerator } = require('./testGenerator');
 const { CodeVerifier } = require('./codeVerifier');
 
 function activate(context) {
-    console.log('Kinmail SRS to Code extension is now active!');
-    vscode.window.showInformationMessage('Kinmail extension activated!');
-    
-    const testCommand = vscode.commands.registerCommand('kinmail.test', () => {
-        vscode.window.showInformationMessage('Kinmail extension is working!');
-    });
-    context.subscriptions.push(testCommand);
+    try {
+        console.log('Kinmail SRS to Code extension is now active!');
+        vscode.window.showInformationMessage('Kinmail extension activated!');
+        
+            const testCommand = vscode.commands.registerCommand('kinmail.test', () => {
+            vscode.window.showInformationMessage('Kinmail extension is working!');
+        });
+        context.subscriptions.push(testCommand);
 
-    const testApiCommand = vscode.commands.registerCommand('kinmail.testApi', async () => {
+        const testApiCommand = vscode.commands.registerCommand('kinmail.testApi', async () => {
         try {
             console.log('🧪 [EXTENSION] Testing API connection...');
-            const webviewProvider = WebviewProvider.getInstance(context.extensionUri);
+            if (!webviewProvider) {
+                webviewProvider = WebviewProvider.getInstance(context.extensionUri);
+            }
             const testResponse = await webviewProvider.callOpenAI('Say "API test successful"');
             console.log('✅ [EXTENSION] API test successful:', testResponse);
             vscode.window.showInformationMessage('API Test: ' + testResponse);
         } catch (error) {
             console.error('❌ [EXTENSION] API test failed:', error);
-            vscode.window.showErrorMessage('API Test Failed: ' + error.message);
+                vscode.window.showErrorMessage('API Test Failed: ' + error.message);
+            }
+        });
+        context.subscriptions.push(testApiCommand);
+
+        const srsManager = new SRSManager(context);
+        const codeGenerator = new CodeGenerator(context);
+        const testGenerator = new TestGenerator(context);
+        const codeVerifier = new CodeVerifier(context);
+        
+        let webviewProvider;
+        try {
+            webviewProvider = WebviewProvider.getInstance(context.extensionUri);
+        } catch (error) {
+            console.error('❌ [EXTENSION] Failed to create WebviewProvider:', error);
+            vscode.window.showWarningMessage(`Webview initialization warning: ${error.message}. Some features may not work.`);
+            // Continue with other commands even if webview fails
         }
-    });
-    context.subscriptions.push(testApiCommand);
+        
+        const openDashboard = vscode.commands.registerCommand('kinmail.openDashboard', () => {
+        try {
+            console.log('Opening dashboard...');
+            if (!webviewProvider) {
+                webviewProvider = WebviewProvider.getInstance(context.extensionUri);
+            }
+            webviewProvider.createOrShow();
+            console.log('Dashboard opened');
+        } catch (error) {
+            console.error('❌ [EXTENSION] Error opening dashboard:', error);
+                vscode.window.showErrorMessage(`Failed to open dashboard: ${error.message}`);
+            }
+        });
 
-    const srsManager = new SRSManager(context);
-    const codeGenerator = new CodeGenerator(context);
-    const testGenerator = new TestGenerator(context);
-    const codeVerifier = new CodeVerifier(context);
-    const webviewProvider = WebviewProvider.getInstance(context.extensionUri);
-    const openDashboard = vscode.commands.registerCommand('kinmail.openDashboard', () => {
-        console.log('Opening dashboard...');
-        webviewProvider.createOrShow();
-        console.log('Dashboard opened');
-    });
-
-    const uploadSRS = vscode.commands.registerCommand('kinmail.uploadSRS', async () => {
+        const uploadSRS = vscode.commands.registerCommand('kinmail.uploadSRS', async () => {
         const fileUri = await vscode.window.showOpenDialog({
             canSelectFiles: true,
             canSelectMany: false,
@@ -53,14 +73,16 @@ function activate(context) {
             try {
                 await srsManager.parseSRS(fileUri[0]);
                 vscode.window.showInformationMessage('SRS document parsed successfully!');
-                webviewProvider.createOrShow();
+                if (webviewProvider) {
+                    webviewProvider.createOrShow();
+                }
             } catch (error) {
                 vscode.window.showErrorMessage(`Failed to parse SRS: ${error}`);
             }
         }
-    });
+        });
 
-    const generateFeature = vscode.commands.registerCommand('kinmail.generateFeature', async () => {
+        const generateFeature = vscode.commands.registerCommand('kinmail.generateFeature', async () => {
         const features = await srsManager.getAvailableFeatures();
         if (features.length === 0) {
             vscode.window.showWarningMessage('No SRS document loaded. Please upload an SRS first.');
@@ -113,45 +135,49 @@ function activate(context) {
                 vscode.window.showErrorMessage(`Failed to generate code: ${error}`);
             }
         }
-    });
+        });
 
-    const runTests = vscode.commands.registerCommand('kinmail.runTests', async () => {
+        const runTests = vscode.commands.registerCommand('kinmail.runTests', async () => {
         try {
             await codeVerifier.runTests();
             vscode.window.showInformationMessage('Tests completed successfully!');
         } catch (error) {
             vscode.window.showErrorMessage(`Tests failed: ${error}`);
         }
-    });
+        });
 
-    const verifyCode = vscode.commands.registerCommand('kinmail.verifyCode', async () => {
+        const verifyCode = vscode.commands.registerCommand('kinmail.verifyCode', async () => {
         try {
             const results = await codeVerifier.verifyAllCode();
             vscode.window.showInformationMessage(`Code verification completed. ${results.passed} passed, ${results.failed} failed.`);
         } catch (error) {
             vscode.window.showErrorMessage(`Verification failed: ${error}`);
         }
-    });
-
-    context.subscriptions.push(
-        openDashboard,
-        uploadSRS,
-        generateFeature,
-        runTests,
-        verifyCode
-    );
-
-    const config = vscode.workspace.getConfiguration('kinmail');
-    const apiKey = config.get('openaiApiKey');
-    if (!apiKey) {
-        vscode.window.showWarningMessage(
-            'Kinmail: OpenAI API key not configured. Please set it in settings.',
-            'Open Settings'
-        ).then(selection => {
-            if (selection === 'Open Settings') {
-                vscode.commands.executeCommand('workbench.action.openSettings', 'kinmail.openaiApiKey');
-            }
         });
+
+        context.subscriptions.push(
+            openDashboard,
+            uploadSRS,
+            generateFeature,
+            runTests,
+            verifyCode
+        );
+
+        const config = vscode.workspace.getConfiguration('kinmail');
+        const apiKey = config.get('openaiApiKey');
+        if (!apiKey) {
+            vscode.window.showWarningMessage(
+                'Kinmail: OpenAI API key not configured. Please set it in settings.',
+                'Open Settings'
+            ).then(selection => {
+                if (selection === 'Open Settings') {
+                    vscode.commands.executeCommand('workbench.action.openSettings', 'kinmail.openaiApiKey');
+                }
+            });
+        }
+    } catch (error) {
+        console.error('❌ [EXTENSION] Fatal error during activation:', error);
+        vscode.window.showErrorMessage(`Extension activation failed: ${error.message}. Check Developer Console for details.`);
     }
 }
 

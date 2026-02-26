@@ -6,10 +6,10 @@ class TestGenerator {
         this.context = context;
     }
 
-    async generateTests(feature, code = null, language = 'python', codeFileName = null) {
+    async generateTests(contract, packet = null, language = 'python') {
         try {
-            if (!feature) {
-                throw new Error('Feature parameter is required for test generation');
+            if (!contract) {
+                throw new Error('Contract parameter is required for test generation');
             }
             
             const config = vscode.workspace.getConfiguration('kinmail');
@@ -19,58 +19,162 @@ class TestGenerator {
                 throw new Error('OpenAI API key not configured');
             }
 
-            const functionalityName = feature?.name || feature?.title || feature || 'unknown_feature';
+            const functionalityName = contract.functionality || 'unknown_functionality';
             
-            const srsInfo = {
-                name: feature?.name || feature?.title || functionalityName,
-                description: feature?.description || '',
-                useCases: feature?.useCases || [],
-                requirements: feature?.requirements || [],
-                context: feature?.context || ''
-            };
+            console.log('🧪 [TESTS] Generating tests from contract for:', functionalityName);
+            console.log('🧪 [TESTS] Contract structure:', {
+                models: contract.file_structure?.models?.length || 0,
+                controllers: contract.file_structure?.controllers?.length || 0,
+                routes: contract.file_structure?.controllers?.reduce((sum, c) => sum + (c.routes?.length || 0), 0) || 0
+            });
+            
+            // Extract file names from contract for import paths
+            const modelFiles = contract.file_structure?.models?.map(m => {
+                const pathParts = m.file_path.split('/');
+                return pathParts[pathParts.length - 1].replace('.py', '');
+            }) || [];
+            const controllerFiles = contract.file_structure?.controllers?.map(c => {
+                const pathParts = c.file_path.split('/');
+                return pathParts[pathParts.length - 1].replace('.py', '');
+            }) || [];
+            
+            // Determine the app file name from contract
+            const appFileName = contract.file_structure?.app_file?.replace('.py', '') || 'app';
+            
+            // Determine if it's MVC structure (has models/, controllers/, views/)
+            const isMVCStructure = (contract.file_structure?.models?.length > 0 || 
+                                   contract.file_structure?.controllers?.length > 0 ||
+                                   contract.file_structure?.views?.length > 0);
+            
+            // Extract exact test requirements from contract for deterministic generation
+            const routes = contract.file_structure?.controllers?.flatMap(c => 
+                c.routes?.map(r => ({
+                    path: r.path,
+                    methods: r.methods,
+                    function_name: r.function_name,
+                    controller_file: c.file_path
+                })) || []
+            ) || [];
+            
+            const models = contract.file_structure?.models || [];
+            const helperFunctions = contract.file_structure?.controllers?.flatMap(c =>
+                c.helper_functions?.map(h => ({
+                    name: h.name,
+                    parameters: h.parameters,
+                    controller_file: c.file_path
+                })) || []
+            ) || [];
+            
+            // Build deterministic test checklist
+            const testChecklist = [];
+            
+            // Model tests
+            models.forEach(model => {
+                testChecklist.push(`MODEL: ${model.class_name} (${model.file_path})`);
+                testChecklist.push(`  - test_${model.class_name.toLowerCase()}_model_has_required_fields: Check all fields exist: ${model.fields?.map(f => f.name).join(', ') || 'NONE'}`);
+                if (model.methods && model.methods.length > 0) {
+                    model.methods.forEach(method => {
+                        const params = method.parameters && Array.isArray(method.parameters) 
+                            ? method.parameters.join(', ') 
+                            : 'N/A';
+                        testChecklist.push(`  - test_${model.class_name.toLowerCase()}_${method.name}: Test ${method.name}(${params}) method`);
+                    });
+                }
+                testChecklist.push(`  - test_${model.class_name.toLowerCase()}_unique_constraints: Test unique constraints on fields: ${model.fields?.filter(f => f.unique).map(f => f.name).join(', ') || 'NONE'}`);
+            });
+            
+            // Route tests
+            routes.forEach(route => {
+                route.methods.forEach(method => {
+                    // Sanitize route path for function names: remove < > : and convert to valid Python identifier
+                    // Example: "/products/<int:product_id>" -> "products_product_id"
+                    let routeName = route.path
+                        .replace(/<[^>]+>/g, (match) => {
+                            // Extract parameter name from <int:product_id> -> product_id
+                            const paramMatch = match.match(/<[^:]*:?([^>]+)>/);
+                            return paramMatch ? paramMatch[1] : 'param';
+                        })
+                        .replace(/\//g, '_')
+                        .replace(/^-|-$/g, '')
+                        .replace(/[^a-zA-Z0-9_]/g, '_') // Remove any remaining invalid chars
+                        .replace(/_+/g, '_') // Collapse multiple underscores
+                        .replace(/^_|_$/g, ''); // Remove leading/trailing underscores
+                    
+                    testChecklist.push(`ROUTE: ${route.path} (${method}) - ${route.function_name}`);
+                    testChecklist.push(`  - test_${routeName}_${method.toLowerCase()}_exists: Verify route exists and accepts ${method}`);
+                    if (method === 'GET') {
+                        testChecklist.push(`  - test_${routeName}_get_renders_template: Test GET renders template`);
+                    }
+                    if (method === 'POST') {
+                        testChecklist.push(`  - test_${routeName}_post_success: Test successful POST with valid data`);
+                        testChecklist.push(`  - test_${routeName}_post_missing_required_fields: Test POST with missing required fields`);
+                        testChecklist.push(`  - test_${routeName}_post_invalid_data: Test POST with invalid data format`);
+                        testChecklist.push(`  - test_${routeName}_post_duplicate_data: Test POST with duplicate data (if applicable)`);
+                    }
+                });
+            });
+            
+            // Helper function tests
+            helperFunctions.forEach(helper => {
+                const funcName = helper.name.replace(/_/g, '_');
+                const params = helper.parameters && Array.isArray(helper.parameters)
+                    ? helper.parameters.join(', ')
+                    : 'N/A';
+                testChecklist.push(`HELPER: ${helper.name}(${params})`);
+                testChecklist.push(`  - test_${funcName}_function_exists: Test ${helper.name} function exists and is callable`);
+                testChecklist.push(`  - test_${funcName}_with_valid_input: Test ${helper.name} with valid parameters`);
+                testChecklist.push(`  - test_${funcName}_with_invalid_input: Test ${helper.name} with invalid parameters`);
+            });
+            
+            // Contract-based test generation
+            const contractJson = JSON.stringify(contract, null, 2);
+            const contractJsonSize = contractJson.length;
+            console.log(`📊 [PROMPT] Contract JSON size: ${contractJsonSize} chars`);
+            
+            const contractSection = `
+📋 API CONTRACT (MUST FOLLOW EXACTLY):
+This contract defines the EXACT structure that the code will implement. Your tests MUST test against this contract structure.
 
-            let srsContext = '';
-            if (srsInfo.description || srsInfo.useCases.length > 0 || srsInfo.requirements.length > 0) {
-                srsContext = `
-SRS REQUIREMENTS:
-Functionality: ${srsInfo.name}
-${srsInfo.description ? `Description: ${srsInfo.description}` : ''}
-${srsInfo.useCases.length > 0 ? `Use Cases: ${srsInfo.useCases.join(', ')}` : ''}
-${srsInfo.requirements.length > 0 ? `Requirements: ${srsInfo.requirements.join(', ')}` : ''}
-${srsInfo.context ? `Additional Context: ${srsInfo.context}` : ''}
+${contractJson}
+
+CRITICAL TEST GENERATION REQUIREMENTS - STRICT CONTRACT ADHERENCE:
+- Generate tests that test the EXACT structure defined in the contract
+- Use the EXACT import paths from contract.import_paths
+- Test ONLY routes defined in contract.file_structure.controllers[].routes
+- Test ONLY models defined in contract.file_structure.models
+- Test ONLY functions defined in contract.file_structure.controllers[].helper_functions
+- DO NOT test models, controllers, or services that are NOT in the contract
+- DO NOT import models that are not listed in contract.file_structure.models
+- DO NOT test EmailVerificationToken, EmailService, or any other models/services not in the contract
+- Use the exact file paths, class names, function names, and route paths from the contract
+- Match function signatures (parameters, return types) from the contract
+- Use the database ORM patterns from contract.database
+- Use the framework test patterns from contract.framework
+- Import paths should match contract.import_paths exactly (e.g., ${contract.import_paths?.models || 'from models.{model_name} import {ModelName}'})
+
+CRITICAL - ONLY TEST WHAT'S IN THE CONTRACT:
+- The contract defines these models: ${contract.file_structure?.models?.map(m => m.class_name).join(', ') || 'NONE'}
+- ONLY import and test these models - DO NOT test models not in this list
+- If verification is needed, test the User.verification_token field (as defined in contract), NOT a separate EmailVerificationToken model
+- DO NOT create test expectations for models, services, or classes that are not in the contract
+
+CONTRACT FILE STRUCTURE:
+- Models: ${modelFiles.join(', ')}
+- Controllers: ${controllerFiles.join(', ')}
+- App file: ${contract.file_structure?.app_file || 'app.py'}
+
+DETERMINISTIC TEST CHECKLIST (GENERATE THESE EXACT TESTS):
+You MUST generate tests for ALL of the following. This ensures consistent test count every time:
+
+${testChecklist.join('\n')}
+
+TOTAL EXPECTED TESTS: Approximately ${testChecklist.length} test functions (one per checklist item above)
+- Generate tests for EVERY item in the checklist above
+- Do NOT skip any items
+- Do NOT add extra tests beyond this checklist
+- This ensures the same number of tests every time
 
 `;
-            }
-
-            let cleanedCode = code;
-            if (cleanedCode) {
-                cleanedCode = cleanedCode.replace(/####\s+([^\n]+)\n/g, '\n=== FILE: $1 ===\n');
-            }
-            
-            const codeSection = code ? `CODE TO TEST:
-${cleanedCode}
-
-CRITICAL: The code above shows the ACTUAL files that exist. You MUST:
-- Import from these files (models/user.py, controllers/user_controller.py, views/user_views.py, app.py)
-- NEVER duplicate or recreate any of this code in the test file
-- Test the routes/functions that ACTUALLY EXIST in the code above
-- Match the exact file structure and function names from the code above
-
-` : '';
-
-            let actualCodeFileName = codeFileName;
-            if (!actualCodeFileName) {
-                if (language === 'java') {
-                    const pascalCaseName = functionalityName.replace(/[^a-zA-Z0-9]/g, '')
-                        .replace(/([a-z])([A-Z])/g, '$1$2')
-                        .split(' ')
-                        .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-                        .join('');
-                    actualCodeFileName = pascalCaseName;
-                } else {
-                    actualCodeFileName = functionalityName.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
-                }
-            }
 
             const testFramework = language === 'python' ? 'pytest' : 
                                  language === 'javascript' ? 'jest' : 
@@ -90,9 +194,39 @@ CRITICAL: The code above shows the ACTUAL files that exist. You MUST:
                 expectedClassName = `${pascalCaseName}Test`;
             }
 
+            const modeInstruction = `\n🔴 TDD MODE (Test-Driven Development):\nGenerate tests FIRST based on the contract specification and SRS requirements. Code will be generated later to pass these tests.\nTests should define the EXPECTED interface and behavior based on the contract and SRS.\n`;
+            
+            // Build SRS context from packet (if available) or contract
+            let srsContext = '';
+            if (packet) {
+                // Use full SRS context from packet (embeddings)
+                srsContext = `
+FUNCTIONALITY: ${packet.name || contract.functionality || functionalityName}
+DESCRIPTION: ${packet.description || 'N/A'}
+USE CASES: ${packet.useCases?.join(', ') || 'N/A'}
+REQUIREMENTS: ${packet.requirements?.join(', ') || 'N/A'}
+ACTIVITY DIAGRAMS: ${packet.activityDiagrams?.join(', ') || 'N/A'}
+DEPENDENCIES: ${packet.dependencies?.join(', ') || 'N/A'}
+CONTEXT: ${packet.context || 'N/A'}
+LANGUAGE: ${contract.language || language}
+ARCHITECTURE: ${contract.architecture || 'MVC'}
+`;
+            } else {
+                // Fallback to contract-only context
+                srsContext = `
+FUNCTIONALITY: ${contract.functionality || functionalityName}
+LANGUAGE: ${contract.language || language}
+ARCHITECTURE: ${contract.architecture || 'MVC'}
+`;
+            }
+            
             const prompt = `Generate comprehensive test cases for the following ${functionalityName} functionality in ${language.toUpperCase()} using MVC architecture:
 
-${srsContext}${codeSection}MVC TESTING REQUIREMENTS:
+${modeInstruction}${srsContext}
+
+${contractSection}
+
+MVC TESTING REQUIREMENTS:
 
 1. MODEL LAYER TESTS:
    - Test data validation and business logic
@@ -113,41 +247,100 @@ ${srsContext}${codeSection}MVC TESTING REQUIREMENTS:
    - Test error handling and validation
 
 CRITICAL REQUIREMENTS:
+
+CRITICAL - TEST FUNCTION NAMING (MANDATORY):
+- Test function names MUST be valid Python identifiers (letters, numbers, underscores only)
+- When routes contain parameters like "/products/<int:product_id>", sanitize them for function names:
+  * WRONG: def test__products_<int:product_id>_get_exists(self):  # INVALID SYNTAX
+  * CORRECT: def test_products_product_id_get_exists(self):  # Extract parameter name, remove < > :
+- Route parameter syntax: "<int:product_id>" → extract "product_id" for function name
+- Route parameter syntax: "<string:name>" → extract "name" for function name
+- Remove all < > : characters from function names - they are INVALID in Python
+- Example route "/products/<int:product_id>/general" → function name: "test_products_product_id_general_get_exists"
+- Always sanitize route paths before using in function names:
+  1. Replace "/" with "_"
+  2. Extract parameter names from <type:name> patterns (use just "name")
+  3. Remove all < > : characters
+  4. Collapse multiple underscores
+  5. Remove leading/trailing underscores
 - Create COMPLETELY STANDALONE tests that require NO external imports (except standard test framework imports)
 - For Java: Include proper JUnit imports (import org.junit.Test; import static org.junit.Assert.*;)
 - For JavaScript: Include proper Jest imports if needed
 - For Python: Include proper pytest imports if needed
 - DO NOT import from any modules that don't exist in the project
 - CRITICAL: For Flask routes (@app.route), ALWAYS import the app from the actual code file - NEVER duplicate or recreate the Flask app
-- CRITICAL: NEVER copy route functions, models, or any code into the test file - ALWAYS import from ${actualCodeFileName}
+- CRITICAL: NEVER copy route functions, models, or any code into the test file - ALWAYS import from the contract-defined file paths
 - CRITICAL: For standalone functions, import from code file - do NOT copy functions into test file
 - Create mock data and test fixtures within the test file
 - Make tests self-contained and runnable without any dependencies
 - Test the core logic and business rules
 - Use mocks for any external dependencies
-- CRITICAL: The test file MUST start with imports from ${actualCodeFileName}, NOT with code duplication
+- CRITICAL: The test file MUST start with imports from contract-defined file paths (app.py, models/, controllers/), NOT with code duplication
 
-CRITICAL CODE STRUCTURE DETECTION:
-- Analyze the code structure FIRST before generating tests
-- If code uses Flask routes (@app.route), generate Flask test client tests (client.post(), client.get())
-- If code uses standalone functions, generate function call tests
-- Match the ACTUAL code structure exactly - do NOT create functions that don't exist in the code
-- If code has Flask app, create app fixture with app.app_context() for database operations
-- CRITICAL: Only test routes/functions that ACTUALLY EXIST in the code
-- If code has @app.route('/register'), test '/register' route - DO NOT test '/login' if it doesn't exist
-- If code has standalone function register_user(), test register_user() - DO NOT test routes if they don't exist
-- Check the CODE TO TEST section above to see what routes/functions actually exist
-- For MVC: Check if code has models/, views/, controllers/ structure and test accordingly
+TEST INDEPENDENCE (CRITICAL):
+- Each test MUST be completely independent and runnable in isolation
+- Tests MUST be able to run in ANY order without affecting each other
+- Each test MUST set up its own test data - NEVER rely on data from other tests
+- Each test MUST clean up after itself - use fixtures with proper teardown
+- Use isolated in-memory databases (sqlite:///:memory:) - each test gets a fresh database
+- NEVER share state between tests (no global variables, no shared fixtures without proper isolation)
+- Each test function MUST be self-contained:
+  * Create all required test data within the test function or in isolated fixtures
+  * Do NOT assume data exists from previous tests
+  * Do NOT leave data for other tests to use
+- Use pytest fixtures with proper setup/teardown for database isolation:
+  @pytest.fixture
+  def client():
+      app.config['TESTING'] = True
+      app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'  # Fresh in-memory DB for each test
+      with app.app_context():
+          db.create_all()  # Create tables
+          yield app.test_client()
+          db.session.remove()  # Clean up session
+          db.drop_all()  # Drop all tables - CRITICAL for isolation
+- For tests that need existing data (e.g., testing login with existing user):
+  * Create the user WITHIN the test function, not in a shared fixture
+  * OR use a fixture that creates fresh data for each test
+  * Example: def test_login(client): user = _create_user_in_db(...); response = client.post('/login', ...)
+- Mock external dependencies (email, file system, APIs) to ensure isolation
+- Use unique test data for each test to avoid conflicts (unique usernames, emails, IDs)
+
+DEPENDENCY AWARENESS (for missing code, NOT test dependencies):
+- Some tests may require other functionalities to be implemented first (e.g., login tests need User model, profile tests need authentication)
+- If a test depends on another feature that might not exist:
+  * Use try/except blocks for optional imports: try: from models.user import User; except ImportError: pytest.skip("User model not implemented")
+  * Check if routes exist before testing: if '/dashboard' not in [r.rule for r in app.url_map.iter_rules()]: pytest.skip("Dashboard route not implemented")
+  * Document dependencies in test docstrings: "# Requires: User model, Login route"
+  * Generate tests that gracefully handle missing dependencies rather than failing with ImportError
+- Common dependencies (these are CODE dependencies, not TEST dependencies):
+  * User-related tests → User model
+  * Authentication tests → User model + Login route
+  * Protected route tests → User model + Login route + Authentication middleware
+  * Relationship tests → Multiple models (User, Product, etc.) + Relationships defined
+  * Redirect tests → Target route must exist (e.g., login redirects to dashboard)
+
+CRITICAL CODE STRUCTURE DETECTION (from contract):
+- Use the contract structure to determine what to test
+- The contract defines ALL routes, models, controllers, and functions that will be implemented
+- Generate tests for ALL routes defined in contract.file_structure.controllers[].routes
+- Generate tests for ALL models defined in contract.file_structure.models
+- Generate tests for ALL helper functions defined in contract.file_structure.controllers[].helper_functions
+- Use Flask test client tests (client.post(), client.get()) for routes
+- Create app fixture with app.app_context() for database operations
+- For MVC: Use the contract-defined structure (models/, views/, controllers/)
 
 Generate:
-1. Analyze the code structure FIRST (Flask routes vs standalone functions vs MVC layers)
-   - Look for @app.route decorators in CODE TO TEST section
-   - Look for standalone function definitions (def function_name:)
-   - Look for MVC structure: models/, views/, controllers/
-   - Identify which routes/functions ACTUALLY EXIST
+1. Use the contract structure to determine what to test
+   - Test ALL routes defined in the contract
+   - Test ALL models defined in the contract
+   - Test ALL helper functions defined in the contract
+   - Use MVC structure from contract (models/, controllers/, views/)
 2. If Flask routes exist (@app.route):
-   - CRITICAL: ALWAYS import the Flask app from ${actualCodeFileName} - NEVER recreate or duplicate the app
-   - MUST use: import sys; import os; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))); from ${actualCodeFileName} import app, db, User (or whatever exists)
+   - CRITICAL: For MVC structure, ALWAYS import from app.py and models/ - NEVER recreate or duplicate
+   - MUST use: import sys; import os; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))); from app import app, db, mail; from models.user import User
+   - For MVC structure: Import from app.py (app, db, mail) and models/ (User, etc.) - NOT from a single module
+   - Use contract-defined file paths: ${contract.file_structure?.app_file || 'app.py'}, models/, controllers/
+   - Import paths should match contract.import_paths exactly
    - Use Flask test client: client = app.test_client()
    - Test ONLY routes that exist: client.post('/actual_route', data={...}) or client.get('/actual_route')
    - DO NOT test routes that don't exist (e.g., don't test '/login' if code only has '/register')
@@ -157,7 +350,7 @@ Generate:
    - If route requires authentication (@login_required from flask_login):
      * Create a test user in the database within app.app_context()
      * Use client.post('/login', data={'username': 'testuser', 'password': 'testpass'}) to login FIRST if login route exists
-     * OR use @patch to mock current_user if login route doesn't exist: @patch('${actualCodeFileName}.current_user', MagicMock(username='testuser', id=1))
+     * OR use @patch to mock current_user if login route doesn't exist: @patch('app.current_user', MagicMock(username='testuser', id=1))
      * DO NOT use Basic auth (request.authorization) if code uses Flask-Login - use session-based login
 3. If MVC structure exists (models/, views/, controllers/):
    - Import models: from models.user import User (models are classes, safe to import)
@@ -182,6 +375,12 @@ Generate:
 10. Positive and negative test cases
 11. Mock data and test fixtures created within the test file
 12. Test setup and teardown with proper Flask app context if using Flask
+13. TEST INDEPENDENCE: Each test must be completely independent:
+    - Each test creates its own test data
+    - Each test uses a fresh database (in-memory SQLite)
+    - Tests can run in any order
+    - No shared state between tests
+    - Proper cleanup in fixtures (db.drop_all(), db.session.remove())
 13. CRITICAL: If SRS requires a feature (parameter, field, validation) that is missing from the generated code:
     - Generate a test that explicitly checks if the feature exists in the code
     - If the feature is missing, the test should FAIL with a clear message indicating the missing SRS requirement
@@ -189,20 +388,45 @@ Generate:
     - Example: If SRS requires "DOB" but code doesn't have it, test should fail with "SRS requires DOB but code doesn't implement it"
     - This ensures tests validate SRS compliance, not just that code runs
 
-FLASK SPECIFIC REQUIREMENTS:
+FLASK SPECIFIC REQUIREMENTS (with TEST INDEPENDENCE):
 - For Flask routes, ALWAYS use Flask test client (app.test_client())
-- Database operations MUST be within app.app_context():
+- Database operations MUST be within app.app_context() with proper isolation:
   @pytest.fixture
   def client():
       app.config['TESTING'] = True
-      app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'
+      app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'  # Fresh in-memory DB for EACH test
+      app.config['SECRET_KEY'] = 'test-secret-key'  # Required for sessions
+      app.config['WTF_CSRF_ENABLED'] = False  # Disable CSRF for testing
       with app.app_context():
-          db.create_all()
+          db.create_all()  # Create tables
           yield app.test_client()
-          db.drop_all()
+          db.session.remove()  # Clean up session
+          db.drop_all()  # CRITICAL: Drop all tables to ensure test independence
+  
+  @pytest.fixture
+  def app_context():
+      app.config['TESTING'] = True
+      app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'  # Fresh DB for each test
+      app.config['SECRET_KEY'] = 'test-secret-key'
+      with app.app_context():
+          db.create_all()  # CRITICAL: Must create tables for app_context fixture too
+          yield
+          db.session.remove()  # Clean up session
+          db.drop_all()  # CRITICAL: Drop all tables for test independence
+  
+  CRITICAL TEST INDEPENDENCE RULES:
+  - Each test MUST use a fresh in-memory database (sqlite:///:memory:)
+  - db.drop_all() MUST be called in fixture teardown to ensure no data persists between tests
+  - db.session.remove() MUST be called to clean up database sessions
+  - Each test MUST create its own test data - NEVER assume data exists from other tests
+  - Use unique identifiers in each test (unique usernames, emails, IDs) to avoid conflicts
+  - Example: Use f"testuser_{random.randint(1000, 9999)}" or f"test_{uuid.uuid4().hex[:8]}" for unique test data
 - Test routes, not standalone functions if code uses @app.route
-- CRITICAL: ALWAYS mock Flask-Mail.send() if controller uses mail.send() - Use @patch('${actualCodeFileName}.mail.send') or @patch('controllers.user_controller.mail.send') (match the actual import path in your code)
-- If ANY test might trigger email sending, wrap it with: with patch('${actualCodeFileName}.mail.send') as mock_send:
+- CRITICAL: ALWAYS mock Flask-Mail.send() if controller uses mail.send():
+  * For MVC structure: Use @patch('app.mail.send') or @patch('controllers.user_controller.mail.send') (replace user_controller with actual controller name)
+  * For single file: Use @patch('${appFileName}.mail.send')
+  * Match the actual import path in your code
+- If ANY test might trigger email sending, wrap it with: with patch('app.mail.send') as mock_send: (for MVC) or with patch('${appFileName}.mail.send') as mock_send: (for single file)
 - Use client.post() with data parameter for form submissions
 - Use client.get() for GET requests
 - CRITICAL - DATE HANDLING IN TESTS:
@@ -225,18 +449,17 @@ FLASK SPECIFIC REQUIREMENTS:
   - For redirect responses: Check response.status_code == 302 and response.location
   - To check flash messages: Use client.get() with follow_redirects=True, OR check session['_flashes']
   - DO NOT check for flash messages in response.data when status_code is 302
-- CRITICAL: Import ONLY what actually exists in the code - check CODE TO TEST section:
-  - For Flask routes (@app.route): DO NOT import route functions (e.g., register, login) - they're not meant to be imported
-  - CORRECT imports for Flask routes: from app import app, db; from models.user import User; from controllers.user_controller import ... (only if controller exports functions, NOT route functions)
-  - WRONG: from controllers.user_controller import register_user (if register_user doesn't exist - route functions are @app.route('/register') def register():)
+- CRITICAL: Import ONLY what is defined in the contract:
+  - For Flask routes: DO NOT import route functions (e.g., register, login) - they're not meant to be imported
+  - CORRECT imports for Flask routes: from app import app, db; from models.user import User; from controllers.user_controller import ... (only if controller exports helper functions, NOT route functions)
   - CORRECT: Test routes via test client: client.post('/register', data={...}) - don't import route functions
   - Add sys.path manipulation: import sys; import os; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
   - Import models, db, app, mail, etc. - but NOT route functions decorated with @app.route
-  - If code has standalone functions (not routes), you can import those: from controllers.user_controller import helper_function (if it exists)
-- CRITICAL: Only test routes that exist in the code
-  - Check CODE TO TEST section to see actual routes (e.g., @app.route('/register'))
-  - DO NOT test routes that don't exist (e.g., don't test '/login' if code only has '/register')
-  - If code doesn't have a login route, don't test authentication - test what actually exists
+  - If contract defines helper functions (not routes), you can import those: from controllers.user_controller import helper_function
+- CRITICAL: Test ALL routes defined in the contract
+  - Use contract.file_structure.controllers[].routes to see all routes (e.g., /register, /login)
+  - Test ALL routes defined in the contract
+  - Use contract-defined import paths from contract.import_paths
   - DO NOT import route functions - test them via client.post('/route', ...) or client.get('/route')
 - CRITICAL: File upload testing
   - ALWAYS use BytesIO for in-memory files - NEVER use open() which requires actual files
@@ -460,7 +683,11 @@ from werkzeug.datastructures import FileStorage
 from io import BytesIO
 # CRITICAL: Add parent directory to path to import code - NEVER duplicate code
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from ${actualCodeFileName} import app, db, User, s, mail  # Import ALL needed objects from code
+# For MVC structure:
+from app import app, db, mail
+from models.user import User
+# OR for single file structure:
+# from ${appFileName} import app, db, User, mail
 
 @pytest.fixture
 def client():
@@ -480,9 +707,31 @@ def client():
         yield app.test_client()
         db.drop_all()
 
+@pytest.fixture
+def app_context():
+    app.config['TESTING'] = True
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'
+    app.config['SECRET_KEY'] = 'test-secret-key'
+    with app.app_context():
+        db.create_all()  # CRITICAL: Must create tables for app_context fixture too
+        yield
+        db.session.remove()
+        db.drop_all()
+
+@pytest.fixture
+def app_context():
+    app.config['TESTING'] = True
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'
+    app.config['SECRET_KEY'] = 'test-secret-key'
+    with app.app_context():
+        db.create_all()  # CRITICAL: Must create tables for app_context fixture too
+        yield
+        db.session.remove()
+        db.drop_all()
+
 def test_register_route(client):
     # CRITICAL: ALWAYS mock mail.send() if controller uses mail - prevents network errors
-    with patch('${actualCodeFileName}.mail.send') as mock_send:
+    with patch('app.mail.send') as mock_send:  # For MVC structure; use '${appFileName}.mail.send' for single file
         response = client.post('/register', data={
             'first_name': 'John',
             'last_name': 'Doe',
@@ -519,7 +768,7 @@ def test_add_product_with_file_upload(client):
 
 def test_add_product_with_login_required(client):
     # If route has @login_required but no login route exists, mock current_user
-    with patch('${actualCodeFileName}.current_user', MagicMock(username='testuser', id=1)):
+    with patch('app.current_user', MagicMock(username='testuser', id=1)):  # For MVC structure; use '${appFileName}.current_user' for single file
         test_file = FileStorage(stream=BytesIO(b'fake image'), filename='test.jpg')
         response = client.post('/add_product', data={'picture': test_file, 'name': 'Test', ...})
         assert response.status_code == 201
@@ -539,7 +788,7 @@ def test_register_duplicate_username(client):
     db.session.commit()
     
     # Try to register with same username
-    with patch('${actualCodeFileName}.mail.send'):  # Mock email
+    with patch('${appFileName}.mail.send'):  # Mock email
         response = client.post('/register', data={
             'username': 'testuser',  # Duplicate
             'email': 'new@example.com',
@@ -561,7 +810,7 @@ CRITICAL FLASH MESSAGE TESTING:
 - For validation errors that render same page (200): Flash messages ARE in response.data
 
 CRITICAL IMPORT REQUIREMENTS:
-- The code file is named: ${actualCodeFileName}${fileExtension}
+- The app file is named: ${appFileName}${fileExtension} (from contract)
 - For Python tests in tests/ subdirectory: MUST add sys.path manipulation:
   import sys
   import os
@@ -571,15 +820,56 @@ CRITICAL IMPORT REQUIREMENTS:
   - from unittest.mock import patch, MagicMock (if using mocks)
   - from werkzeug.datastructures import FileStorage (if testing file uploads)
   - from io import BytesIO (if creating in-memory files)
-- Import from the actual code file name: from ${actualCodeFileName} import app, db, User (or whatever exists in code)
-- DO NOT use placeholder names like "code_to_test", "your_app", "app" - use the actual filename: ${actualCodeFileName}
-- If code uses Flask routes, import: from ${actualCodeFileName} import app, db, User (check what's exported)
-- If code uses standalone functions, import: from ${actualCodeFileName} import function_name
-- Match exact imports to what exists in the code - check the CODE TO TEST section above
+- CRITICAL: Use contract.import_paths to determine import structure:
+  * The contract.import_paths contains ACTUAL import paths based on functionality-based file names
+  * Models: Use ${contract.import_paths?.models || 'from models.{model_name} import {ModelName}'}
+    - If contract.import_paths.models_all exists, use ALL model imports listed there
+    - Example: ${contract.import_paths?.models_all?.join('\n    - ') || contract.import_paths?.models || 'from models.{model_name} import {ModelName}'}
+  * Controllers: Use ${contract.import_paths?.controllers || 'from controllers.{controller_name} import {blueprint_name}'}
+    - Helper functions: ${contract.import_paths?.helper_functions || 'from controllers.{controller_name} import {helper_function_names}'}
+  * Views: Use ${contract.import_paths?.views || 'from views.{view_name} import {function_names}'}
+  * App: Use ${contract.import_paths?.app || 'from app import app, db, mail'}
+- DO NOT use placeholder names - use the EXACT import paths from contract.import_paths
+- The import paths already include functionality-based naming (e.g., models.product_search_product, controllers.product_search_controller)
+
+CRITICAL - SHARED MODEL IMPORTS (MANDATORY - PREVENTS TABLE COLLISIONS):
+- CERTAIN models are SHARED across functionalities and MUST use shared import paths:
+  * User model: ALWAYS import from "models.user" (NOT "models.{functionality}_user")
+    - CORRECT: from models.user import User
+    - WRONG: from models.user_registration_user import User
+    - WRONG: from models.add_product_user import User
+    - WRONG: from models.view_profile_user import User
+  * Product model: ALWAYS import from "models.product" (NOT "models.{functionality}_product")
+    - CORRECT: from models.product import Product
+    - WRONG: from models.product_search_product import Product
+  * Category model: ALWAYS import from "models.category" (NOT "models.{functionality}_category")
+    - CORRECT: from models.category import Category
+    - WRONG: from models.product_search_category import Category
+- Check the contract's model file_path:
+  * If file_path is "models/user.py" → Use: from models.user import User
+  * If file_path is "models/product.py" → Use: from models.product import Product
+  * If file_path is "models/category.py" → Use: from models.category import Category
+  * If file_path is "models/{functionality}_user.py" → This is WRONG, use shared path instead
+- Shared models use the same table name across functionalities (e.g., 'users', 'products', 'categories')
+- DO NOT import from functionality-specific User/Product/Category model paths - they will cause SQLAlchemy table collision errors
+- If the contract specifies a shared model (User, Product, Category), ALWAYS use the shared import path regardless of what contract.import_paths says
+- Override contract.import_paths for shared models: Always use shared paths (models.user, models.product, models.category)
+
+- If code uses Flask routes (@app.route), routes are NOT importable - test via client.post('/route')
+- If code has standalone helper functions (not routes), you can import those
+- Match exact imports to contract.import_paths defined in the contract above
 - CRITICAL: If test uses re.match(), re.search(), or any regex - MUST import re
 - CRITICAL: If test uses @patch or patch() - MUST import from unittest.mock
 
 CRITICAL SYNTAX REQUIREMENTS:
+
+F-STRING RESTRICTIONS (CRITICAL):
+- NEVER use backslashes (\) inside f-string expressions
+- WRONG: f"user{re.sub(r'\\W+', '', num)}"  # SyntaxError: f-string expression part cannot include a backslash
+- CORRECT: cleaned = re.sub(r'\\W+', '', num); f"user{cleaned}"
+- CORRECT: pattern = r'\\W+'; cleaned = re.sub(pattern, '', num); f"user{cleaned}"
+- If you need regex in f-strings, extract the result to a variable FIRST, then use the variable in the f-string
+- Example: username_clean = re.sub(r'[^a-zA-Z0-9]', '', num); email = f"{username_clean}@ex.com"
 - Return ONLY valid ${language} code
 - NO explanatory text outside of comments
 - NO notes, documentation, or instructions in the code
@@ -629,41 +919,85 @@ Test file should be named: ${functionalityName.toLowerCase().replace(/[^a-zA-Z0-
             `;
 
             
-            const maxPromptChars = 50000;
+            // OpenAI API limit: 128k tokens ≈ 500k characters
+            // Using 200k chars as safe limit (allows ~50k tokens for input, leaving room for response)
+            const maxPromptChars = 200000;
             let finalPrompt = prompt;
+            const originalPromptLength = prompt.length;
+            
             if (prompt.length > maxPromptChars) {
-                console.warn(`Prompt too long (${prompt.length} chars), truncating`);
-                const codeSectionIndex = prompt.indexOf('CODE TO TEST');
-                if (codeSectionIndex > 0) {
-                    const beforeCode = prompt.substring(0, codeSectionIndex);
-                    const codeSection = prompt.substring(codeSectionIndex);
-                    const maxCodeLength = maxPromptChars - beforeCode.length - 500;
-                    const truncatedCode = codeSection.substring(0, maxCodeLength);
-                    const lastFileMarker = truncatedCode.lastIndexOf('#### ');
-                    if (lastFileMarker > maxCodeLength * 0.8) {
-                        finalPrompt = beforeCode + truncatedCode.substring(0, lastFileMarker) + '\n\n[Code truncated...]';
+                console.warn(`⚠️ [PROMPT] Too long (${originalPromptLength} chars), optimizing...`);
+                console.log(`📊 [PROMPT] Contract JSON: ${contractJsonSize} chars`);
+                console.log(`📊 [PROMPT] Test checklist: ${testChecklist.length} items`);
+                
+                // CRITICAL: Contract JSON is the most important part - NEVER truncate it
+                // Strategy: Keep contract JSON full, truncate SRS context and verbose instructions
+                
+                const contractJsonStart = prompt.indexOf(contractJson);
+                const contractJsonEnd = contractJsonStart + contractJsonSize;
+                
+                if (contractJsonStart > 0) {
+                    // Split prompt into: before JSON, JSON (MUST KEEP FULL), after JSON
+                    const beforeJson = prompt.substring(0, contractJsonStart);
+                    const jsonSection = prompt.substring(contractJsonStart, contractJsonEnd);
+                    const afterJson = prompt.substring(contractJsonEnd);
+                    
+                    // Calculate space available for other sections
+                    const reservedForJson = jsonSection.length;
+                    const availableSpace = maxPromptChars - reservedForJson - 2000; // Reserve 2k for safety/boundaries
+                    
+                    console.log(`📊 [PROMPT] Sections: before=${beforeJson.length}, contract=${reservedForJson}, after=${afterJson.length}`);
+                    console.log(`📊 [PROMPT] Available space for other sections: ${availableSpace} chars`);
+                    
+                    if (availableSpace > 0) {
+                        // Truncate beforeJson (SRS context) if needed (40% of available space)
+                        let truncatedBefore = beforeJson;
+                        const maxBeforeLength = Math.floor(availableSpace * 0.4);
+                        if (beforeJson.length > maxBeforeLength) {
+                            truncatedBefore = beforeJson.substring(0, maxBeforeLength) + '\n\n[⚠️ SRS context truncated for length - key info preserved in contract]';
+                            console.warn(`⚠️ [PROMPT] Truncated SRS context: ${beforeJson.length} → ${truncatedBefore.length} chars`);
+                        }
+                        
+                        // Truncate afterJson (instructions) with remaining space (60% of available space)
+                        const remainingSpace = availableSpace - truncatedBefore.length;
+                        let truncatedAfter = afterJson;
+                        if (afterJson.length > remainingSpace) {
+                            truncatedAfter = afterJson.substring(0, remainingSpace) + '\n\n[⚠️ Instructions truncated for length - core requirements preserved]';
+                            console.warn(`⚠️ [PROMPT] Truncated instructions: ${afterJson.length} → ${truncatedAfter.length} chars`);
+                        }
+                        
+                        finalPrompt = truncatedBefore + jsonSection + truncatedAfter;
+                        console.warn(`✅ [PROMPT] Optimized: ${originalPromptLength} → ${finalPrompt.length} chars`);
+                        console.log(`✅ [PROMPT] Contract JSON preserved: ${reservedForJson} chars (${Math.round(reservedForJson/finalPrompt.length*100)}% of prompt)`);
                     } else {
-                        finalPrompt = beforeCode + truncatedCode + '\n\n[Code truncated...]';
+                        // Even contract JSON alone is too big - this is a problem
+                        console.error(`❌ [PROMPT] Contract JSON (${reservedForJson} chars) alone exceeds limit (${maxPromptChars})!`);
+                        console.error(`❌ [PROMPT] Keeping full contract anyway - may cause API errors`);
+                        finalPrompt = prompt; // Keep full prompt, let API handle it
                     }
                 } else {
+                    // Couldn't find contract JSON - fallback to simple truncation
+                    console.warn(`⚠️ [PROMPT] Could not locate contract JSON, using simple truncation`);
                     finalPrompt = prompt.substring(0, maxPromptChars);
                 }
+            } else {
+                console.log(`✅ [PROMPT] Length OK: ${originalPromptLength} chars (under ${maxPromptChars} limit)`);
             }
             
             const systemMessage = `You are an expert ${language} tester specializing in MVC architecture testing. 
 
 ABSOLUTE REQUIREMENT - NO CODE DUPLICATION:
-- The CODE TO TEST section shows the ACTUAL code files that exist
-- You MUST import from these files: from app import app, db; from models.user import User
-- DO NOT import route functions: If code has @app.route('/register') def register():, DO NOT import register - test via client.post('/register')
-- Only import: app, db, models (User, etc.), mail, and standalone helper functions (if they exist and are not routes)
-- NEVER duplicate, recreate, or copy ANY code from the CODE TO TEST section into the test file
+- The contract shows the file structure that will be implemented
+- You MUST import from contract-defined files: from app import app, db; from models.user import User
+- DO NOT import route functions: Test routes via client.post('/register') instead of importing
+- Only import: app, db, models (User, etc.), mail, and standalone helper functions (if defined in contract)
+- NEVER duplicate, recreate, or copy ANY code - only import what's defined in the contract
 - NEVER create a new Flask app - ALWAYS import the existing app from app.py
 - NEVER redefine models, routes, or functions - ALWAYS import them
 - The test file should ONLY contain: imports, test fixtures, and test functions
 
 CRITICAL RULES:
-1. Analyze code structure FIRST - check CODE TO TEST section for actual routes/functions/MVC layers
+1. Use contract structure to determine routes/functions/MVC layers
 2. Only test routes/functions that ACTUALLY EXIST - do NOT create tests for non-existent routes
 3. If code has Flask routes (@app.route), ALWAYS import app from app.py - NEVER recreate the Flask app
 4. For MVC structure: Import from models/, views/, controllers/ directories - NEVER duplicate code
@@ -674,13 +1008,27 @@ CRITICAL RULES:
 9. For file uploads: test_file = FileStorage(stream=BytesIO(b'content'), filename='test.jpg') - NEVER use open()
 10. Write comprehensive tests that validate SRS requirements, cover edge cases, handle secure password hashing, input validation
 11. Use proper testing frameworks (pytest/Jest/JUnit)
-12. Return only executable ${language} test code with ALL necessary imports
-13. Test file MUST start with imports from actual code files, NOT with code duplication
-14. For MVC: Test models, views, controllers, and integration flows separately
-15. NO explanatory text, NO HTML comments, NO "Here is" introductions - start DIRECTLY with imports`;
+12. F-STRING RULE (CRITICAL): NEVER put backslashes in f-string expressions. Extract regex results to variables first:
+    - WRONG: f"user{re.sub(r'\\W+', '', num)}"  # SyntaxError!
+    - CORRECT: cleaned = re.sub(r'\\W+', '', num); f"user{cleaned}"
+    - CORRECT: pattern = r'\\W+'; cleaned = re.sub(pattern, '', num); f"user{cleaned}"
+    - If using regex in f-strings, ALWAYS extract the result to a variable FIRST, then use the variable
+13. TEST INDEPENDENCE (CRITICAL): Each test MUST be completely independent:
+    - Each test creates its own test data (use unique identifiers: import random; f"testuser_{random.randint(1000,9999)}" or import uuid; f"test_{uuid.uuid4().hex[:8]}")
+    - Each test uses a fresh in-memory database (sqlite:///:memory:)
+    - Tests MUST be able to run in ANY order without affecting each other
+    - Fixtures MUST call db.drop_all() in teardown to ensure no data persists between tests
+    - Fixtures MUST call db.session.remove() to clean up sessions
+    - NEVER rely on data from other tests - create all required data within each test function
+    - Use isolated fixtures - each test gets a fresh database instance
+    - Example: def test_login(client): user = _create_user_in_db(username=f"user_{random.randint(1000,9999)}", ...); response = client.post('/login', ...)
+14. Return only executable ${language} test code with ALL necessary imports
+15. Test file MUST start with imports from actual code files, NOT with code duplication
+16. For MVC: Test models, views, controllers, and integration flows separately
+17. NO explanatory text, NO HTML comments, NO "Here is" introductions - start DIRECTLY with imports`;
             
             const requestBody = {
-                model: 'gpt-4-turbo',
+                model: 'gpt-5.2',
                 messages: [
                     {
                         role: 'system',
@@ -692,30 +1040,84 @@ CRITICAL RULES:
                     }
                 ],
                 temperature: 0.3,
-                max_tokens: 3000
+                max_completion_tokens: 20000,  // GPT-5.2 requires max_completion_tokens instead of max_tokens (increased for comprehensive test generation)
+                reasoning_effort: 'none'  // Disable reasoning to reduce token usage and speed up generation
             };
             
+            console.log('📊 [TEST-GENERATOR] Making LLM API call for test generation...');
+            console.log('📊 [TEST-GENERATOR] Model: gpt-5.2');
+            console.log('📊 [TEST-GENERATOR] Prompt length:', finalPrompt.length);
+            console.log('📊 [TEST-GENERATOR] System message length:', systemMessage.length);
+            console.log('📊 [TEST-GENERATOR] Max completion tokens:', requestBody.max_completion_tokens);
             
-            const response = await axios.post('https://api.openai.com/v1/chat/completions', requestBody, {
-                headers: {
-                    'Authorization': `Bearer ${apiKey}`,
-                    'Content-Type': 'application/json'
+            let response;
+            try {
+                response = await axios.post('https://api.openai.com/v1/chat/completions', requestBody, {
+                    headers: {
+                        'Authorization': `Bearer ${apiKey}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+            } catch (apiError) {
+                console.error('❌ [TEST-GENERATOR] API Request Error Details:');
+                if (apiError.response) {
+                    console.error('❌ [TEST-GENERATOR] Status:', apiError.response.status);
+                    console.error('❌ [TEST-GENERATOR] Error Data:', JSON.stringify(apiError.response.data, null, 2));
+                    console.error('❌ [TEST-GENERATOR] Request Model:', requestBody.model);
+                    
+                    if (apiError.response.data?.error?.message) {
+                        const errorMsg = apiError.response.data.error.message.toLowerCase();
+                        if (errorMsg.includes('model') || errorMsg.includes('invalid')) {
+                            console.error('❌ [TEST-GENERATOR] Model name may be invalid. Try using: gpt-4o, gpt-4-turbo, or gpt-4');
+                        }
+                    }
                 }
-            });
+                throw apiError;
+            }
 
-            const content = response.data.choices[0]?.message?.content;
+            console.log('📊 [TEST-GENERATOR] Response status:', response.status);
+            console.log('📊 [TEST-GENERATOR] Response data keys:', Object.keys(response.data || {}));
+            console.log('📊 [TEST-GENERATOR] Choices length:', response.data?.choices?.length || 0);
+            
+            if (response.data?.choices && response.data.choices.length > 0) {
+                console.log('📊 [TEST-GENERATOR] First choice keys:', Object.keys(response.data.choices[0] || {}));
+                console.log('📊 [TEST-GENERATOR] Message keys:', Object.keys(response.data.choices[0]?.message || {}));
+            }
+
+            const content = response.data.choices?.[0]?.message?.content;
+            const finishReason = response.data.choices?.[0]?.finish_reason;
+            const usage = response.data.usage;
+            
             if (!content) {
-                console.error('Empty response from API');
+                console.error('❌ [TEST-GENERATOR] Empty response from API');
+                console.error('❌ [TEST-GENERATOR] Finish reason:', finishReason);
+                console.error('❌ [TEST-GENERATOR] Usage:', usage);
+                
+                if (finishReason === 'length') {
+                    console.error('❌ [TEST-GENERATOR] Response was cut off due to token limit');
+                    console.error('❌ [TEST-GENERATOR] Reasoning tokens used:', usage?.completion_tokens_details?.reasoning_tokens);
+                    console.error('❌ [TEST-GENERATOR] Total completion tokens:', usage?.completion_tokens);
+                    throw new Error(`Response was cut off. Used ${usage?.completion_tokens || 0} tokens (${usage?.completion_tokens_details?.reasoning_tokens || 0} for reasoning). Try increasing max_completion_tokens or simplifying the prompt.`);
+                }
+                
+                console.error('❌ [TEST-GENERATOR] Full response data:', JSON.stringify(response.data, null, 2));
                 throw new Error('LLM returned empty response. Please try again.');
             }
             
             
             return content;
         } catch (error) {
-                console.error('Error generating tests:', error.message);
-                if (error.response) {
-                    console.error('API Error:', error.response.status, error.response.data);
+            console.error('❌ [TEST-GENERATOR] Error generating tests with LLM:', error.message);
+            if (error.response) {
+                console.error('❌ [TEST-GENERATOR] API Error Status:', error.response.status);
+                console.error('❌ [TEST-GENERATOR] API Error Data:', JSON.stringify(error.response.data, null, 2));
+                if (error.response.data?.error) {
+                    console.error('❌ [TEST-GENERATOR] Error Message:', error.response.data.error.message);
+                    console.error('❌ [TEST-GENERATOR] Error Type:', error.response.data.error.type);
                 }
+            } else if (error.request) {
+                console.error('❌ [TEST-GENERATOR] Request made but no response received');
+            }
             throw error; // Re-throw error instead of falling back to mocks
         }
     }
