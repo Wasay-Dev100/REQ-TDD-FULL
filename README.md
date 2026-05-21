@@ -47,13 +47,25 @@ Before using the extension, configure your OpenAI API key:
 - `kinmail.autoTest` - Automatically generate tests for generated code (default: `true`)
 - `kinmail.autoVerify` - Automatically verify generated code (default: `true`)
 
+## Sample SRS documents
+
+This repository includes three evaluation SRS documents under `srs/`:
+
+| File | Domain |
+|------|--------|
+| `srs/kinmail_srs.pdf` | E-commerce (Kinmail) |
+| `srs/dineout_srs.pdf` | Restaurant management (Dineout) |
+| `srs/human_srs.pdf` | Healthcare (Human) |
+
+Upload any of these via **Kinmail: Upload SRS Document**, or open the PDF in the editor and use the explorer context menu.
+
 ## Usage
 
 ### 1. Upload SRS Document
 
 - Use the command palette (`Ctrl/Cmd + Shift + P`)
 - Run "Kinmail: Upload SRS Document"
-- Select your SRS file (PDF, DOCX, or TXT)
+- Select your SRS file (PDF, DOCX, or TXT), or use a sample from `srs/`
 
 ### 2. View Dashboard
 
