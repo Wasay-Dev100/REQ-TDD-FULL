@@ -1,0 +1,177 @@
+{
+  "functionality": "user_registration",
+  "language": "python",
+  "architecture": "MVC",
+  "file_structure": {
+    "models": [
+      {
+        "file_path": "models/user.py",
+        "class_name": "User",
+        "table_name": "users",
+        "fields": [
+          {
+            "name": "id",
+            "type": "Integer",
+            "primary_key": true,
+            "nullable": false
+          },
+          {
+            "name": "first_name",
+            "type": "String(50)",
+            "nullable": false
+          },
+          {
+            "name": "middle_name",
+            "type": "String(50)",
+            "nullable": true
+          },
+          {
+            "name": "last_name",
+            "type": "String(50)",
+            "nullable": false
+          },
+          {
+            "name": "username",
+            "type": "String(80)",
+            "unique": true,
+            "nullable": false
+          },
+          {
+            "name": "email",
+            "type": "String(120)",
+            "unique": true,
+            "nullable": false
+          },
+          {
+            "name": "password_hash",
+            "type": "String(128)",
+            "nullable": false
+          },
+          {
+            "name": "contact_number",
+            "type": "String(15)",
+            "nullable": false
+          },
+          {
+            "name": "gender",
+            "type": "String(10)",
+            "nullable": false
+          },
+          {
+            "name": "birthdate",
+            "type": "Date",
+            "nullable": false
+          },
+          {
+            "name": "profile_picture",
+            "type": "String(255)",
+            "nullable": true
+          },
+          {
+            "name": "is_verified",
+            "type": "Boolean",
+            "default": false,
+            "nullable": false
+          },
+          {
+            "name": "verification_token",
+            "type": "String(255)",
+            "nullable": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "set_password",
+            "parameters": ["password"],
+            "return_type": "None"
+          },
+          {
+            "name": "check_password",
+            "parameters": ["password"],
+            "return_type": "bool"
+          },
+          {
+            "name": "generate_verification_token",
+            "parameters": [],
+            "return_type": "str"
+          }
+        ]
+      }
+    ],
+    "controllers": [
+      {
+        "file_path": "controllers/user_controller.py",
+        "routes": [
+          {
+            "path": "/register",
+            "methods": ["GET", "POST"],
+            "function_name": "register",
+            "parameters": [],
+            "return_type": "Response"
+          },
+          {
+            "path": "/verify-email",
+            "methods": ["GET"],
+            "function_name": "verify_email",
+            "parameters": [],
+            "return_type": "Response"
+          },
+          {
+            "path": "/login",
+            "methods": ["GET", "POST"],
+            "function_name": "login",
+            "parameters": [],
+            "return_type": "Response"
+          }
+        ],
+        "helper_functions": [
+          {
+            "name": "send_verification_email",
+            "parameters": ["user", "token"],
+            "return_type": "None"
+          },
+          {
+            "name": "validate_registration_data",
+            "parameters": ["form_data"],
+            "return_type": "tuple[bool, str]"
+          }
+        ]
+      }
+    ],
+    "views": [
+      {
+        "file_path": "views/user_views.py",
+        "functions": []
+      }
+    ],
+    "templates": [
+      {
+        "file_path": "templates/register.html",
+        "route": "/register"
+      },
+      {
+        "file_path": "templates/login.html",
+        "route": "/login"
+      }
+    ],
+    "app_file": "app.py"
+  },
+  "import_paths": {
+    "models": "from models.user import User",
+    "controllers": "from controllers.user_controller import register, verify_email, login",
+    "app": "from app import app, db, mail"
+  },
+  "database": {
+    "orm": "Flask-SQLAlchemy",
+    "session": "db.session",
+    "query_pattern": "User.query.filter_by()",
+    "create_all": "db.create_all()",
+    "drop_all": "db.drop_all()"
+  },
+  "framework": {
+    "name": "Flask",
+    "test_client": "app.test_client()",
+    "fixtures": ["client", "app_context"],
+    "mail": "app.mail.send"
+  }
+}

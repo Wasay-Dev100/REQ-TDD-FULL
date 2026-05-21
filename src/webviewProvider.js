@@ -2766,7 +2766,14 @@ For Flask applications with SQLAlchemy models, you MUST use Flask-SQLAlchemy (NO
        # columns here
 
 3. In controllers/*.py files, ALWAYS use:
-   from flask import Blueprint
+   # CRITICAL - CORRECT FLASK IMPORTS (MANDATORY):
+   # ONLY import these from flask:
+   from flask import Blueprint, request, jsonify, redirect, url_for, flash, render_template
+   # DO NOT import anything else from flask that doesn't exist
+   # DO NOT import jsonpath_ng from flask (it's a separate library, not part of Flask)
+   # DO NOT import any third-party libraries from flask
+   # If you need jsonpath functionality, import it separately: from jsonpath_ng import parse (but only if actually needed)
+   
    from app import db
    
    # CRITICAL - BLUEPRINT INITIALIZATION (MANDATORY):
@@ -6964,7 +6971,14 @@ For Flask applications with SQLAlchemy models, you MUST use Flask-SQLAlchemy (NO
        # columns here
 
 3. In controllers/*.py files, ALWAYS use:
-   from flask import Blueprint
+   # CRITICAL - CORRECT FLASK IMPORTS (MANDATORY):
+   # ONLY import these from flask:
+   from flask import Blueprint, request, jsonify, redirect, url_for, flash, render_template
+   # DO NOT import anything else from flask that doesn't exist
+   # DO NOT import jsonpath_ng from flask (it's a separate library, not part of Flask)
+   # DO NOT import any third-party libraries from flask
+   # If you need jsonpath functionality, import it separately: from jsonpath_ng import parse (but only if actually needed)
+   
    from app import db
    
    # CRITICAL - BLUEPRINT INITIALIZATION (MANDATORY):
